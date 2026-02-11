@@ -44,3 +44,4 @@
 6. **FolderBrowserDialog 导致面板收起**：对话框夺焦触发 Deactivated，用 `$dialogOpen` 标记保护
 7. **File.Replace 原子写入**：防止写入中途崩溃丢数据，先写 .tmp 再 Replace
 8. **剪贴板可能被占用**：`Clipboard.SetText` 需 try-catch，其他程序锁住时会抛异常
+9. **File.Replace + $null 在 PS 5.1 崩溃**：`[System.IO.File]::Replace($src, $dst, $null)` 报"路径形式不合法"，改用 Remove+Move 模式

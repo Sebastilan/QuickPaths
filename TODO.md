@@ -9,6 +9,8 @@
 - [x] 自启动：开机自启(Startup VBS) + 看门狗(Task Scheduler)
 - [x] 稳定性：睡眠/锁屏恢复、显示器热插拔、原子写入、剪贴板保护
 - [x] 项目迁移至 CCA 路径
+- [x] 失效路径自动清理：展开面板时检测，不存在的路径自动移除
+- [x] 修复 SavePaths 数据丢失（File.Replace + $null 在 PS 5.1 不兼容）
 
 ## 未来可选
 - [ ] 开源准备：README 英文版、LICENSE

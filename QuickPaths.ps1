@@ -175,16 +175,18 @@ function script:SavePaths {
                 $json = '[' + $json + ']'
             }
         }
-        # Safe write: temp file then replace (prevents corruption on crash)
+        # Safe write: temp → delete original → rename temp
         $tmp = $script:DataFile + '.tmp'
         [System.IO.File]::WriteAllText($tmp, $json, $noBom)
-        if (Test-Path $script:DataFile) {
-            [System.IO.File]::Replace($tmp, $script:DataFile, $null)
-        } else {
-            [System.IO.File]::Move($tmp, $script:DataFile)
-        }
+        if (Test-Path $script:DataFile) { Remove-Item $script:DataFile -Force }
+        [System.IO.File]::Move($tmp, $script:DataFile)
     } catch {
         Log "SavePaths error: $_"
+        # If move failed, tmp still has good data — try direct write as fallback
+        try {
+            $noBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($script:DataFile, $json, $noBom)
+        } catch {}
         $tmp = $script:DataFile + '.tmp'
         if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
     }
@@ -335,6 +337,17 @@ function script:FlashDot {
 }
 
 function script:RebuildList {
+    # Prune invalid paths
+    $removed = 0
+    for ($i = $script:paths.Count - 1; $i -ge 0; $i--) {
+        if (-not (Test-Path $script:paths[$i].path)) {
+            Log "Pruned: $($script:paths[$i].name) (path gone)"
+            $script:paths.RemoveAt($i)
+            $removed++
+        }
+    }
+    if ($removed -gt 0) { SavePaths }
+
     $lp = $script:listPanel
     $lp.Children.Clear()
 
