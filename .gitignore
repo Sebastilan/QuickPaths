@@ -1,0 +1,9 @@
+# Runtime data
+paths.json
+config.json
+QuickPaths.log
+QuickPaths.log.old
+
+# Temp files
+*.tmp
+_*.ps1
