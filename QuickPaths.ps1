@@ -139,6 +139,7 @@ $script:paths      = [System.Collections.ArrayList]::new()
 $script:dialogOpen = $false
 $script:expanded   = $false
 $script:dotClickPt = $null
+$script:claudeMode = $false
 
 function script:LoadPaths {
     $script:paths.Clear()
@@ -201,6 +202,9 @@ function script:LoadConfig {
             $pos = ConvertFrom-Json $raw
         }
     } catch {}
+    if ($pos -and $pos.PSObject.Properties['claudeMode']) {
+        $script:claudeMode = [bool]$pos.claudeMode
+    }
     # VirtualScreen covers ALL monitors (supports negative coords for extended displays)
     $vl = [System.Windows.SystemParameters]::VirtualScreenLeft
     $vt = [System.Windows.SystemParameters]::VirtualScreenTop
@@ -222,7 +226,7 @@ function script:SaveConfig {
         $l = [int]$script:win.Left
         $t = [int]$script:win.Top
         Log "SaveConfig: ($l,$t)"
-        $json = @{ left = $l; top = $t } | ConvertTo-Json
+        $json = @{ left = $l; top = $t; claudeMode = $script:claudeMode } | ConvertTo-Json
         $noBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($script:ConfigFile, $json, $noBom)
     } catch {}
@@ -236,10 +240,17 @@ function script:Brush([byte]$a, [byte]$r, [byte]$g, [byte]$b) {
         [System.Windows.Media.Color]::FromArgb($a, $r, $g, $b))
 }
 
-# Dot: bright cornflower blue - pairs with dark status bar accents
-$script:C_DotNormal  = Brush 215 105 145 235
-$script:C_DotHover   = Brush 245 125 165 255
-$script:C_DotFlash   = Brush 225 80 185 120
+# ECG monitor — Anthropic brand palette
+$script:C_MonBg        = Brush 240 18 20 26
+$script:C_MonHover     = Brush 250 28 30 38
+$script:C_MonBdrBlue   = Brush 55  106 155 204
+$script:C_MonBdrOrange = Brush 55  217 119 87
+$script:C_WaveBlue     = Brush 190 106 155 204
+$script:C_WaveOrange   = Brush 190 217 119 87
+$script:C_WaveGreen    = Brush 210 120 140 93
+$script:C_PenBlue      = Brush 255 155 200 240
+$script:C_PenOrange    = Brush 255 245 160 125
+$script:C_PenGreen     = Brush 255 165 190 140
 # Panel
 $script:C_PanelBg    = Brush 245 32 34 38
 $script:C_ItemNormal = Brush 22 255 255 255
@@ -256,6 +267,15 @@ $script:C_AddText    = Brush 110 180 180 180
 $script:C_Sep        = Brush 18 255 255 255
 $script:C_White      = [System.Windows.Media.Brushes]::White
 $script:C_Transp     = [System.Windows.Media.Brushes]::Transparent
+# Claude toggle — Anthropic brand orange #d97757
+$script:C_ClaudeOff      = Brush 15  250 249 245
+$script:C_ClaudeOn       = Brush 130 217 119 87
+$script:C_ClaudeHoverOff = Brush 28  250 249 245
+$script:C_ClaudeHoverOn  = Brush 150 217 119 87
+$script:C_ClaudeTextOff  = Brush 75  176 174 165
+$script:C_ClaudeTextOn   = Brush 255 250 249 245
+$script:C_ClaudeBdrOff   = Brush 22  176 174 165
+$script:C_ClaudeBdrOn    = Brush 180 217 119 87
 
 # Window
 $script:win = New-Object System.Windows.Window
@@ -273,19 +293,111 @@ $script:win.Top  = $cfg.top
 
 $root = New-Object System.Windows.Controls.Grid
 
-# Dot (30px dark circle)
+# ECG monitor (72x32 mini screen with 6px padding)
+$script:ecgPadX  = 9
+$script:ecgPadY  = 5
+$script:ecgWaveW = 60
+$script:ecgWaveH = 22
+$script:ecgCount = 360
+
 $script:dot = New-Object System.Windows.Controls.Border
-$script:dot.Width        = 30
-$script:dot.Height       = 30
-$script:dot.CornerRadius = [System.Windows.CornerRadius]::new(15)
-$script:dot.Background   = $script:C_DotNormal
-$script:dot.Cursor       = [System.Windows.Input.Cursors]::Hand
+$script:dot.Width           = 78
+$script:dot.Height          = 32
+$script:dot.CornerRadius    = [System.Windows.CornerRadius]::new(6)
+$script:dot.Background      = $script:C_MonBg
+$script:dot.Cursor          = [System.Windows.Input.Cursors]::Hand
+$script:dot.BorderThickness = [System.Windows.Thickness]::new(1)
 $script:dot.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
-    BlurRadius  = 10
+    BlurRadius  = 12
     ShadowDepth = 1
-    Opacity     = 0.30
+    Opacity     = 0.35
     Color       = [System.Windows.Media.Colors]::Black
 }
+
+$script:canvas = New-Object System.Windows.Controls.Canvas
+$script:canvas.ClipToBounds     = $true
+$script:canvas.IsHitTestVisible = $false
+$script:dot.Child = $script:canvas
+
+# Waveform polyline (120 points, 0.5px spacing, one full cycle visible)
+$script:waveLine = New-Object System.Windows.Shapes.Polyline
+$script:waveLine.StrokeThickness = 1.5
+$script:waveLine.IsHitTestVisible = $false
+$script:yValues = [System.Collections.ArrayList]::new()
+$yBot = $script:ecgPadY + $script:ecgWaveH
+for ($i = 0; $i -lt $script:ecgCount; $i++) { [void]$script:yValues.Add($yBot) }
+$pts = New-Object System.Windows.Media.PointCollection
+for ($i = 0; $i -lt $script:ecgCount; $i++) {
+    $x = $script:ecgPadX + $script:ecgWaveW * $i / ($script:ecgCount - 1)
+    $pts.Add([System.Windows.Point]::new($x, $yBot))
+}
+$script:waveLine.Points = $pts
+$script:canvas.Children.Add($script:waveLine)
+
+# Pen head (glowing dot at right edge)
+$script:penHead = New-Object System.Windows.Shapes.Ellipse
+$script:penHead.Width  = 6
+$script:penHead.Height = 6
+$script:penHead.IsHitTestVisible = $false
+$script:penHead.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
+    BlurRadius  = 8
+    ShadowDepth = 0
+    Opacity     = 0.8
+}
+[System.Windows.Controls.Canvas]::SetLeft($script:penHead, $script:ecgPadX + $script:ecgWaveW - 3)
+[System.Windows.Controls.Canvas]::SetTop($script:penHead, $yBot - 3)
+$script:canvas.Children.Add($script:penHead)
+
+# ECG breathing — Daoist 吸4s → 闭4s → 呼8s → 静2s (18s cycle, 50ms tick)
+$script:breathTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:breathTimer.Interval = [TimeSpan]::FromMilliseconds(50)
+$script:breathTick = 0
+$script:breathTimer.Add_Tick({
+    $script:breathTick++
+    if ($script:breathTick -ge 360) { $script:breathTick = 0 }
+    $k = $script:breathTick
+    if ($k -lt 80) {
+        $v = (1 - [Math]::Cos($k / 80.0 * [Math]::PI)) / 2
+    } elseif ($k -lt 160) {
+        $v = 1.0
+    } elseif ($k -lt 320) {
+        $v = (1 + [Math]::Cos(($k - 160) / 160.0 * [Math]::PI)) / 2
+    } else {
+        $v = 0.0
+    }
+    # Scroll waveform every tick (360 points, 20 FPS)
+    $y = $script:ecgPadY + $script:ecgWaveH * (1 - $v)
+    $script:yValues.RemoveAt(0)
+    [void]$script:yValues.Add($y)
+    $pts = New-Object System.Windows.Media.PointCollection
+    for ($i = 0; $i -lt $script:ecgCount; $i++) {
+        $x = $script:ecgPadX + $script:ecgWaveW * $i / ($script:ecgCount - 1)
+        $pts.Add([System.Windows.Point]::new($x, $script:yValues[$i]))
+    }
+    $script:waveLine.Points = $pts
+    [System.Windows.Controls.Canvas]::SetTop($script:penHead, $y - 3)
+    # Pen head glow pulses with breath
+    $script:penHead.Effect.Opacity = 0.4 + 0.55 * $v
+})
+
+function script:UpdateDotAppearance {
+    if ($script:claudeMode) {
+        $script:dot.BorderBrush  = $script:C_MonBdrOrange
+        $script:waveLine.Stroke  = $script:C_WaveOrange
+        $script:penHead.Fill     = $script:C_PenOrange
+        $script:penHead.Effect.Color = [System.Windows.Media.Color]::FromRgb(217, 119, 87)
+    } else {
+        $script:dot.BorderBrush  = $script:C_MonBdrBlue
+        $script:waveLine.Stroke  = $script:C_WaveBlue
+        $script:penHead.Fill     = $script:C_PenBlue
+        $script:penHead.Effect.Color = [System.Windows.Media.Color]::FromRgb(106, 155, 204)
+    }
+    if (-not $script:breathTimer.IsEnabled) {
+        $script:breathTick = 0
+        $script:breathTimer.Start()
+    }
+}
+UpdateDotAppearance
 
 # Panel
 $script:panel = New-Object System.Windows.Controls.Border
@@ -327,12 +439,20 @@ function script:Expand {
 $script:_ft = New-Object System.Windows.Threading.DispatcherTimer
 $script:_ft.Interval = [TimeSpan]::FromMilliseconds(700)
 $script:_ft.Add_Tick({
-    $script:dot.Background = $script:C_DotNormal
+    # Restore wave/pen colors after flash
+    if ($script:claudeMode) {
+        $script:waveLine.Stroke = $script:C_WaveOrange
+        $script:penHead.Fill    = $script:C_PenOrange
+    } else {
+        $script:waveLine.Stroke = $script:C_WaveBlue
+        $script:penHead.Fill    = $script:C_PenBlue
+    }
     $script:_ft.Stop()
 })
 function script:FlashDot {
     $script:_ft.Stop()
-    $script:dot.Background = $script:C_DotFlash
+    $script:waveLine.Stroke = $script:C_WaveGreen
+    $script:penHead.Fill    = $script:C_PenGreen
     $script:_ft.Start()
 }
 
@@ -350,6 +470,59 @@ function script:RebuildList {
 
     $lp = $script:listPanel
     $lp.Children.Clear()
+
+    # Claude mode toggle (top of panel)
+    $claudeBtn = New-Object System.Windows.Controls.Border
+    $claudeBtn.Padding      = [System.Windows.Thickness]::new(10,6,10,6)
+    $claudeBtn.CornerRadius = [System.Windows.CornerRadius]::new(7)
+    $claudeBtn.Cursor       = [System.Windows.Input.Cursors]::Hand
+    $claudeBtn.Margin       = [System.Windows.Thickness]::new(0,0,0,4)
+
+    $claudeText = New-Object System.Windows.Controls.TextBlock
+    $claudeText.Text                = 'Claude'
+    $claudeText.FontSize            = 13
+    $claudeText.FontWeight          = 'Medium'
+    $claudeText.HorizontalAlignment = 'Center'
+    $claudeText.IsHitTestVisible    = $false
+    $claudeBtn.Child = $claudeText
+
+    if ($script:claudeMode) {
+        $claudeBtn.Background      = $script:C_ClaudeOn
+        $claudeBtn.BorderBrush     = $script:C_ClaudeBdrOn
+        $claudeBtn.BorderThickness = [System.Windows.Thickness]::new(1.5)
+        $claudeText.Foreground     = $script:C_ClaudeTextOn
+        $claudeBtn.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
+            BlurRadius  = 20
+            ShadowDepth = 0
+            Opacity     = 0.7
+            Color       = [System.Windows.Media.Color]::FromRgb(217, 119, 87)
+        }
+    } else {
+        $claudeBtn.Background      = $script:C_ClaudeOff
+        $claudeBtn.BorderBrush     = $script:C_ClaudeBdrOff
+        $claudeBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+        $claudeText.Foreground     = $script:C_ClaudeTextOff
+        $claudeBtn.Effect          = $null
+    }
+
+    $claudeBtn.Add_MouseEnter({
+        param($s)
+        if ($script:claudeMode) { $s.Background = $script:C_ClaudeHoverOn }
+        else                    { $s.Background = $script:C_ClaudeHoverOff }
+    })
+    $claudeBtn.Add_MouseLeave({
+        param($s)
+        if ($script:claudeMode) { $s.Background = $script:C_ClaudeOn }
+        else                    { $s.Background = $script:C_ClaudeOff }
+    })
+    $claudeBtn.Add_MouseLeftButtonDown({
+        $script:claudeMode = -not $script:claudeMode
+        SaveConfig
+        UpdateDotAppearance
+        RebuildList
+    })
+
+    $lp.Children.Add($claudeBtn)
 
     if ($script:paths.Count -eq 0) {
         $hint = New-Object System.Windows.Controls.TextBlock
@@ -461,8 +634,13 @@ function script:RebuildList {
         $nameBtn.Add_MouseLeave({ param($s) $s.Background = $script:C_ItemNormal })
         $nameBtn.Add_MouseLeftButtonDown({
             param($s)
-            try { [System.Windows.Clipboard]::SetText($s.Tag) }
-            catch { Log "Clipboard error: $_"; return }
+            if ($script:claudeMode) {
+                $p = $s.Tag
+                Start-Process powershell -ArgumentList '-NoExit', '-Command', "cd '$p'; claude"
+            } else {
+                try { [System.Windows.Clipboard]::SetText($s.Tag) }
+                catch { Log "Clipboard error: $_"; return }
+            }
             Collapse; FlashDot
         })
         $row.Children.Add($nameBtn)
@@ -508,7 +686,7 @@ function script:RebuildList {
                 $dup = $false
                 foreach ($p in $script:paths) { if ($p.path -eq $fp) { $dup = $true; break } }
                 if (-not $dup) {
-                    [void]$script:paths.Add([PSCustomObject]@{ name = $fn; path = $fp })
+                    $script:paths.Insert(0, [PSCustomObject]@{ name = $fn; path = $fp })
                     $added++
                 }
             }
@@ -529,8 +707,8 @@ function script:RebuildList {
 }
 
 # Dot interaction: click to expand, drag to move
-$script:dot.Add_MouseEnter({ $script:dot.Background = $script:C_DotHover })
-$script:dot.Add_MouseLeave({ $script:dot.Background = $script:C_DotNormal })
+$script:dot.Add_MouseEnter({ $script:dot.Background = $script:C_MonHover })
+$script:dot.Add_MouseLeave({ $script:dot.Background = $script:C_MonBg })
 
 $script:dot.Add_MouseLeftButtonDown({
     param($s, $e)
@@ -631,6 +809,7 @@ $script:healthTimer.Start()
 $script:win.Add_Closed({
     Log 'Window closed'
     $script:healthTimer.Stop()
+    $script:breathTimer.Stop()
     SaveConfig
     try { [Microsoft.Win32.SystemEvents]::Remove_PowerModeChanged($null) } catch {}
     try { [Microsoft.Win32.SystemEvents]::Remove_SessionSwitch($null) } catch {}

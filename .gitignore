@@ -6,4 +6,7 @@ QuickPaths.log.old
 
 # Temp files
 *.tmp
-_*.ps1
+nul
+
+# Dev-only scripts
+_restart.ps1
