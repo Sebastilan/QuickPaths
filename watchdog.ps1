@@ -1,4 +1,4 @@
-$mutexName = 'Global\QuickPaths_Singleton'
+﻿$mutexName = 'Global\QuickPaths_Singleton'
 $m = $null
 try {
     $m = [System.Threading.Mutex]::OpenExisting($mutexName)

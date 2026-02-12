@@ -16,9 +16,26 @@ Tired from coding, frustrated by a bug, waiting for CI to finish — glance at t
 
 ## Install
 
-**Double-click `Install.cmd`** — done.
+Pick whichever feels easiest:
 
-This will:
+**Option A — One command** (recommended)
+
+Open PowerShell and paste:
+```powershell
+irm https://raw.githubusercontent.com/Sebastilan/QuickPaths/master/setup.ps1 | iex
+```
+
+**Option B — Download the installer**
+
+Download [QuickPathsSetup.exe](https://github.com/Sebastilan/QuickPaths/releases/latest) from Releases and double-click it.
+
+**Option C — Clone and run**
+```
+git clone https://github.com/Sebastilan/QuickPaths.git
+```
+Then double-click `Install.cmd` in the folder.
+
+All three methods will:
 - Set up auto-start on boot
 - Register a watchdog (auto-restarts within 3 minutes if crashed)
 - Launch QuickPaths immediately
@@ -40,6 +57,7 @@ This will:
 
 - Windows 10 / 11
 - PowerShell 5.1 (ships with Windows)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI for Claude Mode (optional — path copying works without it)
 - No admin rights required
 
 ## License
@@ -48,4 +66,4 @@ This will:
 
 ---
 
-> **中文** | 用 Claude Code 的人都知道这个烦：找文件夹、复制路径、开终端、cd、敲 claude，项目一多每天重复几十次。QuickPaths 把项目路径钉在桌面悬浮圆点上，点一下就启动 claude。圆点内置道家吐纳呼吸引导（吸 4s → 闭 4s → 呼 8s → 静 2s），写代码累了跟着呼吸几轮。双击 `Install.cmd` 一键安装。
+> **中文** | 用 Claude Code 的人都知道这个烦：找文件夹、复制路径、开终端、cd、敲 claude，项目一多每天重复几十次。QuickPaths 把项目路径钉在桌面悬浮圆点上，点一下就启动 claude。圆点内置道家吐纳呼吸引导（吸 4s → 闭 4s → 呼 8s → 静 2s），写代码累了跟着呼吸几轮。安装：PowerShell 运行 `irm https://raw.githubusercontent.com/Sebastilan/QuickPaths/master/setup.ps1 | iex`，或从 Releases 下载 exe。

@@ -12,7 +12,10 @@
 | 文件 | 用途 |
 |------|------|
 | `QuickPaths.ps1` | 主程序（WPF 悬浮窗 + 全部逻辑） |
-| `Install.cmd` | 一键安装入口（双击即用） |
+| `setup.ps1` | 在线安装脚本（`irm \| iex` 一行命令安装） |
+| `setup.cs` | exe 安装器 C# 源码（不入库，用 csc.exe 编译） |
+| `QuickPathsSetup.exe` | exe 安装器（不入库，上传到 GitHub Releases） |
+| `Install.cmd` | 本地安装入口（clone 后双击） |
 | `install.ps1` | 安装逻辑（生成 VBS、注册看门狗、启动） |
 | `Uninstall.cmd` | 一键卸载入口 |
 | `uninstall.ps1` | 卸载逻辑（停进程、清 VBS、清任务） |
