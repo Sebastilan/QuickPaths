@@ -218,6 +218,11 @@ function script:LoadConfig {
         $pos = [PSCustomObject]@{ left = [int]($wa.Width - 60); top = [int]($wa.Height * 0.4) }
         Log "LoadConfig: out of bounds, using default ($($pos.left),$($pos.top))"
     }
+    if ($pos -and $pos.PSObject.Properties['scale']) {
+        $script:initialScale = [double]$pos.scale
+    } else {
+        $script:initialScale = 1.0
+    }
     return $pos
 }
 
@@ -226,7 +231,7 @@ function script:SaveConfig {
         $l = [int]$script:win.Left
         $t = [int]$script:win.Top
         Log "SaveConfig: ($l,$t)"
-        $json = @{ left = $l; top = $t; claudeMode = $script:claudeMode } | ConvertTo-Json
+        $json = @{ left = $l; top = $t; claudeMode = $script:claudeMode; scale = $script:dotScale.ScaleX } | ConvertTo-Json
         $noBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($script:ConfigFile, $json, $noBom)
     } catch {}
@@ -293,16 +298,16 @@ $script:win.Top  = $cfg.top
 
 $root = New-Object System.Windows.Controls.Grid
 
-# ECG monitor (72x32 mini screen with 6px padding)
-$script:ecgPadX  = 9
-$script:ecgPadY  = 5
+# ECG monitor (waveform 60x22, padded for glow breathing room)
+$script:ecgPadX  = 12
+$script:ecgPadY  = 8
 $script:ecgWaveW = 60
 $script:ecgWaveH = 22
 $script:ecgCount = 360
 
 $script:dot = New-Object System.Windows.Controls.Border
-$script:dot.Width           = 78
-$script:dot.Height          = 32
+$script:dot.Width           = 88
+$script:dot.Height          = 38
 $script:dot.CornerRadius    = [System.Windows.CornerRadius]::new(6)
 $script:dot.Background      = $script:C_MonBg
 $script:dot.Cursor          = [System.Windows.Input.Cursors]::Hand
@@ -314,8 +319,11 @@ $script:dot.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -P
     Color       = [System.Windows.Media.Colors]::Black
 }
 
+$script:dotScale = New-Object System.Windows.Media.ScaleTransform($script:initialScale, $script:initialScale)
+$script:dot.LayoutTransform = $script:dotScale
+
 $script:canvas = New-Object System.Windows.Controls.Canvas
-$script:canvas.ClipToBounds     = $true
+$script:canvas.ClipToBounds     = $false
 $script:canvas.IsHitTestVisible = $false
 $script:dot.Child = $script:canvas
 
@@ -334,19 +342,53 @@ for ($i = 0; $i -lt $script:ecgCount; $i++) {
 $script:waveLine.Points = $pts
 $script:canvas.Children.Add($script:waveLine)
 
-# Pen head (glowing dot at right edge)
+# Pen head glow layers (outer → middle → head, painted in order so head is on top)
+$script:glowRX = $script:ecgPadX + $script:ecgWaveW   # right-edge X anchor
+
+# Outer glow (30x30, soft radial gradient)
+$script:penGlow2 = New-Object System.Windows.Shapes.Ellipse
+$script:penGlow2.Width  = 30
+$script:penGlow2.Height = 30
+$script:penGlow2.IsHitTestVisible = $false
+$script:penGlow2.Opacity = 0.0
+[System.Windows.Controls.Canvas]::SetLeft($script:penGlow2, $script:glowRX - 15)
+[System.Windows.Controls.Canvas]::SetTop($script:penGlow2, $yBot - 15)
+$script:canvas.Children.Add($script:penGlow2)
+
+# Middle glow (16x16)
+$script:penGlow1 = New-Object System.Windows.Shapes.Ellipse
+$script:penGlow1.Width  = 16
+$script:penGlow1.Height = 16
+$script:penGlow1.IsHitTestVisible = $false
+$script:penGlow1.Opacity = 0.0
+[System.Windows.Controls.Canvas]::SetLeft($script:penGlow1, $script:glowRX - 8)
+[System.Windows.Controls.Canvas]::SetTop($script:penGlow1, $yBot - 8)
+$script:canvas.Children.Add($script:penGlow1)
+
+# Pen head (6x6, on top)
 $script:penHead = New-Object System.Windows.Shapes.Ellipse
 $script:penHead.Width  = 6
 $script:penHead.Height = 6
 $script:penHead.IsHitTestVisible = $false
 $script:penHead.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
-    BlurRadius  = 8
+    BlurRadius  = 15
     ShadowDepth = 0
     Opacity     = 0.8
 }
-[System.Windows.Controls.Canvas]::SetLeft($script:penHead, $script:ecgPadX + $script:ecgWaveW - 3)
+[System.Windows.Controls.Canvas]::SetLeft($script:penHead, $script:glowRX - 3)
 [System.Windows.Controls.Canvas]::SetTop($script:penHead, $yBot - 3)
 $script:canvas.Children.Add($script:penHead)
+
+# Helper: create RadialGradientBrush for glow layers
+function script:MakeGlowBrush([System.Windows.Media.Color]$c, [double]$centerAlpha, [double]$edgeAlpha) {
+    $rgb = $c
+    $center = [System.Windows.Media.Color]::FromArgb([byte]([Math]::Min(255, $centerAlpha * 255)), $rgb.R, $rgb.G, $rgb.B)
+    $edge   = [System.Windows.Media.Color]::FromArgb([byte]([Math]::Min(255, $edgeAlpha   * 255)), $rgb.R, $rgb.G, $rgb.B)
+    $brush = New-Object System.Windows.Media.RadialGradientBrush
+    $brush.GradientStops.Add((New-Object System.Windows.Media.GradientStop($center, 0.0)))
+    $brush.GradientStops.Add((New-Object System.Windows.Media.GradientStop($edge,   1.0)))
+    return $brush
+}
 
 # ECG breathing — Daoist 吸4s → 闭4s → 呼8s → 静2s (18s cycle, 50ms tick)
 $script:breathTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -376,8 +418,13 @@ $script:breathTimer.Add_Tick({
     }
     $script:waveLine.Points = $pts
     [System.Windows.Controls.Canvas]::SetTop($script:penHead, $y - 3)
-    # Pen head glow pulses with breath
+    # Glow layers follow pen head Y position
+    [System.Windows.Controls.Canvas]::SetTop($script:penGlow2, $y - 15)
+    [System.Windows.Controls.Canvas]::SetTop($script:penGlow1, $y - 8)
+    # Glow pulses with breath
     $script:penHead.Effect.Opacity = 0.4 + 0.55 * $v
+    $script:penGlow1.Opacity = 0.18 + 0.50 * $v
+    $script:penGlow2.Opacity = 0.08 + 0.30 * $v
 })
 
 function script:UpdateDotAppearance {
@@ -386,11 +433,17 @@ function script:UpdateDotAppearance {
         $script:waveLine.Stroke  = $script:C_WaveOrange
         $script:penHead.Fill     = $script:C_PenOrange
         $script:penHead.Effect.Color = [System.Windows.Media.Color]::FromRgb(217, 119, 87)
+        $cOrange = [System.Windows.Media.Color]::FromRgb(217, 119, 87)
+        $script:penGlow1.Fill = MakeGlowBrush $cOrange 0.7 0.0
+        $script:penGlow2.Fill = MakeGlowBrush $cOrange 0.4 0.0
     } else {
         $script:dot.BorderBrush  = $script:C_MonBdrBlue
         $script:waveLine.Stroke  = $script:C_WaveBlue
         $script:penHead.Fill     = $script:C_PenBlue
         $script:penHead.Effect.Color = [System.Windows.Media.Color]::FromRgb(106, 155, 204)
+        $cBlue = [System.Windows.Media.Color]::FromRgb(106, 155, 204)
+        $script:penGlow1.Fill = MakeGlowBrush $cBlue 0.7 0.0
+        $script:penGlow2.Fill = MakeGlowBrush $cBlue 0.4 0.0
     }
     if (-not $script:breathTimer.IsEnabled) {
         $script:breathTick = 0
@@ -732,6 +785,17 @@ $script:dot.Add_MouseLeftButtonUp({
     param($s, $e)
     if ($script:dotClickPt) { Expand }
     $script:dotClickPt = $null
+})
+
+# Scroll wheel to resize dot
+$script:dot.Add_MouseWheel({
+    param($s, $e)
+    $delta = if ($e.Delta -gt 0) { 0.1 } else { -0.1 }
+    $newScale = [Math]::Round($script:dotScale.ScaleX + $delta, 1)
+    $newScale = [Math]::Max(0.5, [Math]::Min(3.0, $newScale))
+    $script:dotScale.ScaleX = $newScale
+    $script:dotScale.ScaleY = $newScale
+    SaveConfig
 })
 
 # Right-click dot to exit

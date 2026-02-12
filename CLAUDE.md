@@ -52,3 +52,11 @@
 8. **剪贴板可能被占用**：`Clipboard.SetText` 需 try-catch，其他程序锁住时会抛异常
 9. **File.Replace + $null 在 PS 5.1 崩溃**：`[System.IO.File]::Replace($src, $dst, $null)` 报"路径形式不合法"，改用 Remove+Move 模式
 10. **setup_watchdog.ps1 已废弃**：功能合并到 install.ps1，安装时动态生成 watchdog.ps1 和 Startup VBS
+11. **CSDN 外链图片转存失败**：jsDelivr CDN / GitHub raw URL 都会被 CSDN 拦截（"图片转存失败"）。必须手动上传到 CSDN 图床，用 `i-blog.csdnimg.cn/direct/xxx` 链接
+
+## CSDN 图床链接
+
+| 图片 | CSDN 图床 URL |
+|------|--------------|
+| hero.png | `https://i-blog.csdnimg.cn/direct/259b8f03cc454d08af67bc8db0fc6078.png` |
+| breathing.gif | `https://i-blog.csdnimg.cn/direct/914ba54968f9426fbda96ede93e65fc7.gif` |
