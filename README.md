@@ -1,5 +1,9 @@
 # QuickPaths
 
+<p align="center">
+  <img src="assets/hero.png" alt="QuickPaths — floating dot with breathing waveform and project path panel" width="720">
+</p>
+
 Every Claude Code user knows the drill: find the project folder in Explorer, copy the path, open a terminal, `cd` there, type `claude`. Multiply that by a dozen projects a day.
 
 QuickPaths pins your project paths to the desktop as a floating dot. Click the dot, click a project name — terminal opens, directory is set, `claude` starts. One step.
@@ -8,7 +12,13 @@ QuickPaths pins your project paths to the desktop as a floating dot. Click the d
 
 **Claude Mode** — The reason QuickPaths exists. Toggle it on and clicking a path launches a terminal with `claude` running in that directory, skipping the entire "find folder → copy path → open terminal → cd → claude" routine. Toggle it off for plain path-to-clipboard copying.
 
-**Breathing Guide** — The floating dot carries a gently rising and falling waveform. Its rhythm comes from Daoist *tuna* (吐纳) breathwork: inhale 4 s → hold 4 s → exhale 8 s → rest 2 s, an 18-second cycle. As Zhuangzi wrote, "吹呴呼吸，吐故纳新" — *blow and breathe, expel the old and draw in the new* (*Zhuangzi · Keyi*). The key is that exhalation is longer than inhalation — extended exhales activate the vagus nerve, shifting the body from sympathetic arousal (fight-or-flight) to parasympathetic dominance (rest-and-recover). This is not mysticism; modern neuroscience has a clear mechanistic explanation.
+**Breathing Guide** — The floating dot carries a gently rising and falling waveform.
+
+<p align="center">
+  <img src="assets/breathing.gif" alt="Breathing animation — inhale, hold, exhale, rest" width="400">
+</p>
+
+Its rhythm comes from Daoist *tuna* (吐纳) breathwork: inhale 4 s → hold 4 s → exhale 8 s → rest 2 s, an 18-second cycle. As Zhuangzi wrote, "吹呴呼吸，吐故纳新" — *blow and breathe, expel the old and draw in the new* (*Zhuangzi · Keyi*). The key is that exhalation is longer than inhalation — extended exhales activate the vagus nerve, shifting the body from sympathetic arousal (fight-or-flight) to parasympathetic dominance (rest-and-recover). This is not mysticism; modern neuroscience has a clear mechanistic explanation.
 
 Tired from coding, frustrated by a bug, waiting for CI to finish — glance at the quietly breathing dot on your desktop and follow its rhythm for a few cycles. No meditation app needed, no need to leave your desk. A few breath cycles to bring your heart rate down. A dev tool that also looks after your mental state.
 
