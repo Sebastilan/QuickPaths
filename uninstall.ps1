@@ -1,6 +1,6 @@
 <#
     QuickPaths Uninstaller
-    Removes auto-start, watchdog task, and optionally user data.
+    Removes auto-start, wrapper process, and optionally user data.
 #>
 
 Add-Type -AssemblyName PresentationFramework
@@ -31,19 +31,41 @@ if ($found) {
     Start-Sleep -Milliseconds 500
 }
 
-# --- 2. Remove Startup VBS ---
+# --- 2. Kill VBS wrapper (wscript.exe running QuickPaths.vbs) ---
+
+Get-Process wscript -ErrorAction SilentlyContinue | Where-Object {
+    try {
+        $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue
+        $wmi.CommandLine -like '*QuickPaths.vbs*'
+    } catch { $false }
+} | ForEach-Object {
+    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+}
+
+# --- 3. Remove Startup VBS ---
 
 $vbsPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'QuickPaths.vbs'
 if (Test-Path $vbsPath) {
     Remove-Item $vbsPath -Force -ErrorAction SilentlyContinue
 }
 
-# --- 3. Remove Task Scheduler watchdog ---
+# --- 4. Remove Task Scheduler watchdog (backward compat) ---
 
 $taskName = 'QuickPaths_Watchdog'
 schtasks /Delete /TN $taskName /F 2>$null
 
-# --- 4. Ask about user data ---
+# Clean up old watchdog files
+$watchdogVbs = Join-Path $projectDir 'watchdog.vbs'
+$watchdogPs1 = Join-Path $projectDir 'watchdog.ps1'
+if (Test-Path $watchdogVbs) { Remove-Item $watchdogVbs -Force -ErrorAction SilentlyContinue }
+if (Test-Path $watchdogPs1) { Remove-Item $watchdogPs1 -Force -ErrorAction SilentlyContinue }
+
+# --- 5. Clean up wrapper.lock ---
+
+$lockFile = Join-Path $projectDir 'wrapper.lock'
+if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
+
+# --- 6. Ask about user data ---
 
 $r = [System.Windows.MessageBox]::Show(
     "Delete user data (saved paths and window position)?`n`n" +
@@ -64,6 +86,6 @@ if ($r -eq 'Yes') {
 [System.Windows.MessageBox]::Show(
     "QuickPaths uninstalled.`n`n" +
     "  Auto-start: Removed`n" +
-    "  Watchdog task: Removed`n" +
+    "  Wrapper process: Stopped`n" +
     "  Program files: Kept (delete manually if desired)",
     'QuickPaths Uninstall', 'OK', 'Information')

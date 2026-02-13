@@ -1,6 +1,6 @@
 <#
     QuickPaths Installer
-    Automatically sets up auto-start, watchdog, and launches QuickPaths.
+    Sets up auto-start with crash-recovery VBS wrapper and launches QuickPaths.
 #>
 
 Add-Type -AssemblyName PresentationFramework
@@ -9,7 +9,6 @@ $projectDir = $PSScriptRoot
 if (-not $projectDir) { $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 $mainScript = Join-Path $projectDir 'QuickPaths.ps1'
-$watchdogScript = Join-Path $projectDir 'watchdog.ps1'
 
 # --- Pre-checks ---
 
@@ -27,72 +26,102 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     exit 1
 }
 
-# --- 1. Generate Startup VBS (auto-start on boot) ---
+# --- 1. Clean up old installation (watchdog files + scheduled task) ---
+
+$taskName = 'QuickPaths_Watchdog'
+schtasks /Delete /TN $taskName /F 2>$null
+
+$oldWatchdogPs1 = Join-Path $projectDir 'watchdog.ps1'
+$oldWatchdogVbs = Join-Path $projectDir 'watchdog.vbs'
+if (Test-Path $oldWatchdogPs1) { Remove-Item $oldWatchdogPs1 -Force -ErrorAction SilentlyContinue }
+if (Test-Path $oldWatchdogVbs) { Remove-Item $oldWatchdogVbs -Force -ErrorAction SilentlyContinue }
+
+# --- 2. Generate Startup VBS with crash-recovery loop ---
 
 $startupDir = [System.IO.Path]::Combine(
     [Environment]::GetFolderPath('Startup'))  # shell:startup
 $vbsPath = Join-Path $startupDir 'QuickPaths.vbs'
+$lockFile = Join-Path $projectDir 'wrapper.lock'
 
+# VBS wraps PowerShell in a Do...Loop:
+#   exit 0 → user quit → stop loop
+#   exit !0 → crash → 2s delay → restart
+#   5 crashes in 60s → back off 30s
+#   wrapper.lock prevents double-wrapping
 $vbsContent = @"
+Set fso = CreateObject("Scripting.FileSystemObject")
+lockFile = "$lockFile"
+
+' Prevent double wrapper
+If fso.FileExists(lockFile) Then
+    Set lockStream = fso.OpenTextFile(lockFile, 1)
+    existingPid = Trim(lockStream.ReadLine())
+    lockStream.Close
+    On Error Resume Next
+    Set wmi = GetObject("winmgmts:")
+    Set proc = wmi.Get("Win32_Process.Handle='" & existingPid & "'")
+    If Err.Number = 0 Then
+        If InStr(LCase(proc.CommandLine), LCase("QuickPaths.vbs")) > 0 Then
+            WScript.Quit 0
+        End If
+    End If
+    On Error GoTo 0
+End If
+
+' Write our PID to lock
+Set lockStream = fso.CreateTextFile(lockFile, True)
+lockStream.WriteLine WScript.ProcessID
+lockStream.Close
+
 Set ws = CreateObject("WScript.Shell")
-ws.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$mainScript""", 0, False
+cmd = "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$mainScript"""
+
+crashCount = 0
+lastCrashTime = Now
+
+Do
+    exitCode = ws.Run(cmd, 0, True)
+    If exitCode = 0 Then Exit Do
+
+    ' Track crash rate
+    crashCount = crashCount + 1
+    If DateDiff("s", lastCrashTime, Now) > 60 Then
+        crashCount = 1
+        lastCrashTime = Now
+    End If
+
+    ' Back off if crashing too fast
+    If crashCount >= 5 Then
+        WScript.Sleep 30000
+        crashCount = 0
+        lastCrashTime = Now
+    Else
+        WScript.Sleep 2000
+    End If
+Loop
+
+' Clean up lock file
+On Error Resume Next
+fso.DeleteFile lockFile
+On Error GoTo 0
 "@
 [System.IO.File]::WriteAllText($vbsPath, $vbsContent, [System.Text.Encoding]::ASCII)
 
-# --- 2. Generate watchdog.ps1 (dynamic path) ---
+# --- 3. Ensure QuickPaths.ps1 has UTF-8 BOM (required for PS 5.1 + CJK) ---
 
-$watchdogCode = @'
-$mutexName = 'Global\QuickPaths_Singleton'
-$m = $null
-try {
-    $m = [System.Threading.Mutex]::OpenExisting($mutexName)
-} catch {
-    $dir = $PSScriptRoot
-    if (-not $dir) { $dir = Split-Path -Parent $MyInvocation.MyCommand.Path }
-    $ps1 = Join-Path $dir 'QuickPaths.ps1'
-    Start-Process powershell.exe -ArgumentList ('-ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ps1 + '"') -WindowStyle Hidden
-}
-'@
 $bom = New-Object System.Text.UTF8Encoding($true)
-[System.IO.File]::WriteAllText($watchdogScript, $watchdogCode, $bom)
-
-# --- 3. Register Task Scheduler watchdog (current user, no admin) ---
-
-$taskName = 'QuickPaths_Watchdog'
-
-# Remove existing task if any
-schtasks /Delete /TN $taskName /F 2>$null
-
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchdogScript`""
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 3)
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME `
-    -LogonType Interactive -RunLevel Limited
-
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-    -Settings $settings -Principal $principal -Force | Out-Null
-
-# --- 4. Ensure QuickPaths.ps1 has UTF-8 BOM (required for PS 5.1 + CJK) ---
-
 $content = [System.IO.File]::ReadAllText($mainScript, [System.Text.Encoding]::UTF8)
 [System.IO.File]::WriteAllText($mainScript, $content, $bom)
 
-# --- 5. Launch QuickPaths ---
+# --- 4. Launch QuickPaths via VBS wrapper ---
 
-Start-Process powershell.exe `
-    -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$mainScript`"" `
-    -WindowStyle Hidden
+Start-Process wscript.exe -ArgumentList "`"$vbsPath`"" -WindowStyle Hidden
 
 # --- Done ---
 
 [System.Windows.MessageBox]::Show(
     "QuickPaths installed successfully!`n`n" +
-    "  Auto-start: Enabled`n" +
-    "  Watchdog: Every 3 minutes`n" +
+    "  Auto-start: Enabled (with crash recovery)`n" +
     "  Location: $projectDir`n`n" +
     "The floating dot should appear on your desktop.",
     'QuickPaths Install', 'OK', 'Information')

@@ -110,7 +110,7 @@ try {
 } catch [System.Threading.AbandonedMutexException] {
     $script:ownsMutex = $true
 }
-if (-not $script:ownsMutex) { exit }
+if (-not $script:ownsMutex) { exit 0 }
 
 # Paths
 $script:Dir = $PSScriptRoot
@@ -128,10 +128,44 @@ function script:Log([string]$msg) {
             if (Test-Path $bak) { Remove-Item $bak -Force }
             Move-Item $script:LogFile $bak -Force
         }
-        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
         [System.IO.File]::AppendAllText($script:LogFile, "[$ts] $msg`r`n", [System.Text.Encoding]::UTF8)
     } catch {}
 }
+
+function script:LogError([string]$context, [System.Exception]$ex) {
+    Log "ERROR [$context] $($ex.GetType().FullName): $($ex.Message)"
+    if ($ex.StackTrace) { Log "  StackTrace: $($ex.StackTrace)" }
+    $inner = $ex.InnerException
+    $depth = 0
+    while ($inner -and $depth -lt 5) {
+        Log "  Inner[$depth]: $($inner.GetType().FullName): $($inner.Message)"
+        $inner = $inner.InnerException
+        $depth++
+    }
+}
+
+function script:LogCrashContext {
+    try {
+        $uptime = if ($script:startTime) { ((Get-Date) - $script:startTime).ToString('hh\:mm\:ss\.fff') } else { 'N/A' }
+        Log "  CrashContext: PID=$PID Uptime=$uptime Expanded=$($script:expanded) DialogOpen=$($script:dialogOpen)"
+        $vl = [System.Windows.SystemParameters]::VirtualScreenLeft
+        $vt = [System.Windows.SystemParameters]::VirtualScreenTop
+        $vw = [System.Windows.SystemParameters]::VirtualScreenWidth
+        $vh = [System.Windows.SystemParameters]::VirtualScreenHeight
+        Log "  CrashContext: VirtualScreen=($vl,$vt,$vw,$vh)"
+        if ($script:win) {
+            Log "  CrashContext: WindowPos=($([int]$script:win.Left),$([int]$script:win.Top)) Topmost=$($script:win.Topmost)"
+        }
+        $mem = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+        Log "  CrashContext: ManagedMemory=${mem}MB"
+    } catch {}
+}
+
+$script:startTime = Get-Date
+$script:exitCode = 1
+$script:intentionalExit = $false
+
 Log 'QuickPaths starting...'
 
 # State
@@ -395,36 +429,41 @@ $script:breathTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:breathTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $script:breathTick = 0
 $script:breathTimer.Add_Tick({
-    $script:breathTick++
-    if ($script:breathTick -ge 360) { $script:breathTick = 0 }
-    $k = $script:breathTick
-    if ($k -lt 80) {
-        $v = (1 - [Math]::Cos($k / 80.0 * [Math]::PI)) / 2
-    } elseif ($k -lt 160) {
-        $v = 1.0
-    } elseif ($k -lt 320) {
-        $v = (1 + [Math]::Cos(($k - 160) / 160.0 * [Math]::PI)) / 2
-    } else {
-        $v = 0.0
+    try {
+        $script:breathTick++
+        if ($script:breathTick -ge 360) { $script:breathTick = 0 }
+        $k = $script:breathTick
+        if ($k -lt 80) {
+            $v = (1 - [Math]::Cos($k / 80.0 * [Math]::PI)) / 2
+        } elseif ($k -lt 160) {
+            $v = 1.0
+        } elseif ($k -lt 320) {
+            $v = (1 + [Math]::Cos(($k - 160) / 160.0 * [Math]::PI)) / 2
+        } else {
+            $v = 0.0
+        }
+        # Scroll waveform every tick (360 points, 20 FPS)
+        $y = $script:ecgPadY + $script:ecgWaveH * (1 - $v)
+        $script:yValues.RemoveAt(0)
+        [void]$script:yValues.Add($y)
+        $pts = New-Object System.Windows.Media.PointCollection
+        for ($i = 0; $i -lt $script:ecgCount; $i++) {
+            $x = $script:ecgPadX + $script:ecgWaveW * $i / ($script:ecgCount - 1)
+            $pts.Add([System.Windows.Point]::new($x, $script:yValues[$i]))
+        }
+        $script:waveLine.Points = $pts
+        [System.Windows.Controls.Canvas]::SetTop($script:penHead, $y - 3)
+        # Glow layers follow pen head Y position
+        [System.Windows.Controls.Canvas]::SetTop($script:penGlow2, $y - 15)
+        [System.Windows.Controls.Canvas]::SetTop($script:penGlow1, $y - 8)
+        # Glow pulses with breath
+        $script:penHead.Effect.Opacity = 0.4 + 0.55 * $v
+        $script:penGlow1.Opacity = 0.18 + 0.50 * $v
+        $script:penGlow2.Opacity = 0.08 + 0.30 * $v
+    } catch {
+        Log "breathTimer error: $($_.Exception.Message)"
+        $script:breathTimer.Stop()
     }
-    # Scroll waveform every tick (360 points, 20 FPS)
-    $y = $script:ecgPadY + $script:ecgWaveH * (1 - $v)
-    $script:yValues.RemoveAt(0)
-    [void]$script:yValues.Add($y)
-    $pts = New-Object System.Windows.Media.PointCollection
-    for ($i = 0; $i -lt $script:ecgCount; $i++) {
-        $x = $script:ecgPadX + $script:ecgWaveW * $i / ($script:ecgCount - 1)
-        $pts.Add([System.Windows.Point]::new($x, $script:yValues[$i]))
-    }
-    $script:waveLine.Points = $pts
-    [System.Windows.Controls.Canvas]::SetTop($script:penHead, $y - 3)
-    # Glow layers follow pen head Y position
-    [System.Windows.Controls.Canvas]::SetTop($script:penGlow2, $y - 15)
-    [System.Windows.Controls.Canvas]::SetTop($script:penGlow1, $y - 8)
-    # Glow pulses with breath
-    $script:penHead.Effect.Opacity = 0.4 + 0.55 * $v
-    $script:penGlow1.Opacity = 0.18 + 0.50 * $v
-    $script:penGlow2.Opacity = 0.08 + 0.30 * $v
 })
 
 function script:UpdateDotAppearance {
@@ -492,15 +531,20 @@ function script:Expand {
 $script:_ft = New-Object System.Windows.Threading.DispatcherTimer
 $script:_ft.Interval = [TimeSpan]::FromMilliseconds(700)
 $script:_ft.Add_Tick({
-    # Restore wave/pen colors after flash
-    if ($script:claudeMode) {
-        $script:waveLine.Stroke = $script:C_WaveOrange
-        $script:penHead.Fill    = $script:C_PenOrange
-    } else {
-        $script:waveLine.Stroke = $script:C_WaveBlue
-        $script:penHead.Fill    = $script:C_PenBlue
+    try {
+        # Restore wave/pen colors after flash
+        if ($script:claudeMode) {
+            $script:waveLine.Stroke = $script:C_WaveOrange
+            $script:penHead.Fill    = $script:C_PenOrange
+        } else {
+            $script:waveLine.Stroke = $script:C_WaveBlue
+            $script:penHead.Fill    = $script:C_PenBlue
+        }
+        $script:_ft.Stop()
+    } catch {
+        Log "flashTimer error: $($_.Exception.Message)"
+        $script:_ft.Stop()
     }
-    $script:_ft.Stop()
 })
 function script:FlashDot {
     $script:_ft.Stop()
@@ -760,60 +804,74 @@ function script:RebuildList {
 }
 
 # Dot interaction: click to expand, drag to move
-$script:dot.Add_MouseEnter({ $script:dot.Background = $script:C_MonHover })
-$script:dot.Add_MouseLeave({ $script:dot.Background = $script:C_MonBg })
+$script:dot.Add_MouseEnter({ try { $script:dot.Background = $script:C_MonHover } catch {} })
+$script:dot.Add_MouseLeave({ try { $script:dot.Background = $script:C_MonBg } catch {} })
 
 $script:dot.Add_MouseLeftButtonDown({
     param($s, $e)
-    $script:dotClickPt = [System.Windows.Forms.Cursor]::Position
+    try { $script:dotClickPt = [System.Windows.Forms.Cursor]::Position } catch {}
 })
 
 $script:dot.Add_MouseMove({
     param($s, $e)
-    if ($e.LeftButton -eq 'Pressed' -and $script:dotClickPt) {
-        $cur = [System.Windows.Forms.Cursor]::Position
-        if ([Math]::Abs($cur.X - $script:dotClickPt.X) -gt 5 -or
-            [Math]::Abs($cur.Y - $script:dotClickPt.Y) -gt 5) {
-            $script:dotClickPt = $null
-            $script:win.DragMove()
-            SaveConfig
+    try {
+        if ($e.LeftButton -eq 'Pressed' -and $script:dotClickPt) {
+            $cur = [System.Windows.Forms.Cursor]::Position
+            if ([Math]::Abs($cur.X - $script:dotClickPt.X) -gt 5 -or
+                [Math]::Abs($cur.Y - $script:dotClickPt.Y) -gt 5) {
+                $script:dotClickPt = $null
+                $script:win.DragMove()
+                SaveConfig
+            }
         }
-    }
+    } catch { Log "dot.MouseMove error: $($_.Exception.Message)" }
 })
 
 $script:dot.Add_MouseLeftButtonUp({
     param($s, $e)
-    if ($script:dotClickPt) { Expand }
-    $script:dotClickPt = $null
+    try {
+        if ($script:dotClickPt) { Expand }
+        $script:dotClickPt = $null
+    } catch { Log "dot.MouseUp error: $($_.Exception.Message)" }
 })
 
 # Scroll wheel to resize dot
 $script:dot.Add_MouseWheel({
     param($s, $e)
-    $delta = if ($e.Delta -gt 0) { 0.1 } else { -0.1 }
-    $newScale = [Math]::Round($script:dotScale.ScaleX + $delta, 1)
-    $newScale = [Math]::Max(0.5, [Math]::Min(3.0, $newScale))
-    $script:dotScale.ScaleX = $newScale
-    $script:dotScale.ScaleY = $newScale
-    SaveConfig
+    try {
+        $delta = if ($e.Delta -gt 0) { 0.1 } else { -0.1 }
+        $newScale = [Math]::Round($script:dotScale.ScaleX + $delta, 1)
+        $newScale = [Math]::Max(0.5, [Math]::Min(3.0, $newScale))
+        $script:dotScale.ScaleX = $newScale
+        $script:dotScale.ScaleY = $newScale
+        SaveConfig
+    } catch { Log "dot.MouseWheel error: $($_.Exception.Message)" }
 })
 
 # Right-click dot to exit
 $script:dot.Add_MouseRightButtonUp({
-    $msgTitle = [char]0x786E + [char]0x8BA4
-    $msgBody  = [char]0x9000 + [char]0x51FA + ' QuickPaths' + [char]0xFF1F
-    $r = [System.Windows.MessageBox]::Show($msgBody, $msgTitle, 'YesNo', 'Question')
-    if ($r -eq 'Yes') { $script:win.Close() }
+    try {
+        $msgTitle = [char]0x786E + [char]0x8BA4
+        $msgBody  = [char]0x9000 + [char]0x51FA + ' QuickPaths' + [char]0xFF1F
+        $r = [System.Windows.MessageBox]::Show($msgBody, $msgTitle, 'YesNo', 'Question')
+        if ($r -eq 'Yes') {
+            $script:intentionalExit = $true
+            $script:exitCode = 0
+            $script:win.Close()
+        }
+    } catch { Log "RightClick error: $($_.Exception.Message)" }
 })
 
 # Click outside to collapse
 $script:win.Add_Deactivated({
-    if ($script:expanded -and -not $script:dialogOpen) { Collapse }
+    try {
+        if ($script:expanded -and -not $script:dialogOpen) { Collapse }
+    } catch { Log "Deactivated error: $($_.Exception.Message)" }
 })
 
-# Re-assert Topmost helper
+# Re-assert Topmost helper (BeginInvoke to avoid render pipeline deadlock)
 function script:ReassertTopmost {
-    $script:win.Dispatcher.Invoke({
+    $script:win.Dispatcher.BeginInvoke([Action]{
         $script:win.Topmost = $false
         $script:win.Topmost = $true
     })
@@ -822,34 +880,41 @@ function script:ReassertTopmost {
 # Sleep/wake recovery
 [Microsoft.Win32.SystemEvents]::Add_PowerModeChanged({
     param($sender, $e)
-    if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Resume) {
-        Log 'System resumed from sleep'
-        ReassertTopmost
-    }
+    try {
+        if ($e.Mode -eq [Microsoft.Win32.PowerModes]::Resume) {
+            Log 'System resumed from sleep'
+            ReassertTopmost
+        }
+    } catch { Log "PowerModeChanged error: $($_.Exception.Message)" }
 })
 
 # Lock/unlock recovery
 [Microsoft.Win32.SystemEvents]::Add_SessionSwitch({
     param($sender, $e)
-    if ($e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionUnlock) {
-        Log 'Session unlocked'
-        ReassertTopmost
-    }
+    try {
+        if ($e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionUnlock) {
+            Log 'Session unlocked'
+            ReassertTopmost
+        }
+    } catch { Log "SessionSwitch error: $($_.Exception.Message)" }
 })
 
-# Monitor plug/unplug: re-validate position
-[Microsoft.Win32.SystemEvents]::Add_DisplaySettingsChanged({
-    Log 'Display settings changed'
-    $script:win.Dispatcher.Invoke({
+# Monitor plug/unplug: debounced re-validate position (1500ms settle time)
+$script:displayChangeTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:displayChangeTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
+$script:displayChangeTimer.Add_Tick({
+    try {
+        $script:displayChangeTimer.Stop()
         $vl = [System.Windows.SystemParameters]::VirtualScreenLeft
         $vt = [System.Windows.SystemParameters]::VirtualScreenTop
         $vw = [System.Windows.SystemParameters]::VirtualScreenWidth
         $vh = [System.Windows.SystemParameters]::VirtualScreenHeight
         $wl = $script:win.Left
         $wt = $script:win.Top
+        Log "DisplayChange settled: Window=($wl,$wt) VirtualScreen=($vl,$vt,$vw,$vh)"
         if ($wl -lt $vl -or $wl -gt ($vl + $vw - 30) -or
             $wt -lt $vt -or $wt -gt ($vt + $vh - 30)) {
-            Log "Window off-screen ($wl,$wt), resetting"
+            Log "Window off-screen, resetting"
             $wa = [System.Windows.SystemParameters]::WorkArea
             $script:win.Left = $wa.Width - 60
             $script:win.Top  = $wa.Height * 0.4
@@ -857,24 +922,38 @@ function script:ReassertTopmost {
         }
         $script:win.Topmost = $false
         $script:win.Topmost = $true
-    })
+    } catch { Log "displayChangeTimer error: $($_.Exception.Message)" }
+})
+
+[Microsoft.Win32.SystemEvents]::Add_DisplaySettingsChanged({
+    try {
+        Log 'Display settings changed (debouncing...)'
+        $script:win.Dispatcher.BeginInvoke([Action]{
+            $script:displayChangeTimer.Stop()
+            $script:displayChangeTimer.Start()
+        })
+    } catch { Log "DisplaySettingsChanged error: $($_.Exception.Message)" }
 })
 
 # Periodic health check: re-assert Topmost every 5 minutes
 $script:healthTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:healthTimer.Interval = [TimeSpan]::FromMinutes(5)
 $script:healthTimer.Add_Tick({
-    $script:win.Topmost = $false
-    $script:win.Topmost = $true
+    try {
+        $script:win.Topmost = $false
+        $script:win.Topmost = $true
+    } catch { Log "healthTimer error: $($_.Exception.Message)" }
 })
 $script:healthTimer.Start()
 
 # Cleanup
 $script:win.Add_Closed({
-    Log 'Window closed'
+    Log "Window closed (intentional=$($script:intentionalExit) exitCode=$($script:exitCode))"
     $script:healthTimer.Stop()
     $script:breathTimer.Stop()
+    $script:displayChangeTimer.Stop()
     SaveConfig
+    if ($script:intentionalExit) { $script:exitCode = 0 }
     try { [Microsoft.Win32.SystemEvents]::Remove_PowerModeChanged($null) } catch {}
     try { [Microsoft.Win32.SystemEvents]::Remove_SessionSwitch($null) } catch {}
     try { [Microsoft.Win32.SystemEvents]::Remove_DisplaySettingsChanged($null) } catch {}
@@ -883,10 +962,41 @@ $script:win.Add_Closed({
 
 # Launch
 Log 'Launching...'
+$app = New-Object System.Windows.Application
+
+# Global exception handlers
+$app.Add_DispatcherUnhandledException({
+    param($sender, $e)
+    $e.Handled = $true
+    LogError 'Dispatcher.UnhandledException' $e.Exception
+    LogCrashContext
+    # Fatal: DUCE/Render/COM/OOM → must restart
+    $msg = $e.Exception.GetType().FullName + ' ' + $e.Exception.Message
+    $fatal = $msg -match 'DUCE|Render|UCEERR|COMException|OutOfMemoryException'
+    if ($fatal) {
+        Log 'FATAL dispatcher error — closing for restart'
+        $script:exitCode = 2
+        try { $script:win.Close() } catch {}
+    } else {
+        Log 'Non-fatal dispatcher error — handled, continuing'
+    }
+})
+
+[System.AppDomain]::CurrentDomain.Add_UnhandledException({
+    param($sender, $e)
+    $ex = [System.Exception]$e.ExceptionObject
+    LogError 'AppDomain.UnhandledException' $ex
+    LogCrashContext
+    $script:exitCode = 3
+    try { $script:win.Close() } catch {}
+})
+
 try {
-    $app = New-Object System.Windows.Application
     $app.Run($script:win)
 } catch {
-    Log "FATAL: $($_.Exception.Message)"
+    LogError 'Application.Run' $_.Exception
+    LogCrashContext
+    $script:exitCode = 1
 }
-Log 'Exited.'
+Log "Exiting with code $($script:exitCode)"
+exit $script:exitCode

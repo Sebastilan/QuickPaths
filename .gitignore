@@ -11,6 +11,9 @@ nul
 # Dev-only scripts
 _restart.ps1
 
+# Generated at install/runtime
+wrapper.lock
+
 # Build artifacts
 *.exe
 setup.cs

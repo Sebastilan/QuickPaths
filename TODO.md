@@ -14,6 +14,11 @@
 - [x] 开源准备：一键安装/卸载、动态路径、LICENSE、README 英文版
 - [x] 滚轮缩放：鼠标滚轮调节圆点大小（0.5x–3.0x），比例持久化
 - [x] 笔头光晕：三层径向渐变发光（外30px+中16px+笔头），跟呼吸同步脉动
+- [x] 稳定性改造：全局异常处理（Dispatcher/AppDomain）、退出码约定、VBS 崩溃恢复包裹（替代 Task Scheduler 看门狗）
+- [x] Dispatcher.Invoke→BeginInvoke 修复渲染管线死锁
+- [x] 显示器变更防抖（1500ms DispatcherTimer）
+- [x] 所有事件处理器 try-catch 保护
+- [x] 增强日志：毫秒时间戳、LogError 完整堆栈、LogCrashContext 运行上下文
 
 ## 未来可选
 - [ ] 主题切换：深色/浅色自适应
