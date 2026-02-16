@@ -8,8 +8,9 @@ QuickPaths.log.old
 *.tmp
 nul
 
-# Dev-only scripts
+# Dev-only
 _restart.ps1
+.claude/
 
 # Legacy runtime files
 wrapper.lock
