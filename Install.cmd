@@ -1,2 +1,2 @@
 @echo off
-powershell -ExecutionPolicy Bypass -File "%~dp0install.ps1"
+"%~dp0QuickPaths.exe" --install

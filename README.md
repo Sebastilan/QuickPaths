@@ -22,7 +22,7 @@ Its rhythm comes from Daoist *tuna* (吐纳) breathwork: inhale 4 s → hold 4 s
 
 Tired from coding, frustrated by a bug, waiting for CI to finish — glance at the quietly breathing dot on your desktop and follow its rhythm for a few cycles. No meditation app needed, no need to leave your desk. A few breath cycles to bring your heart rate down. A dev tool that also looks after your mental state.
 
-**Zero Dependencies** — Pure PowerShell 5.1 + WPF. No Node.js, no Python, no Electron. What ships with Windows is enough. Double-click to install, no package manager, no admin rights.
+**Zero Dependencies** — A single 39 KB native exe, compiled from C# with the .NET Framework csc.exe that ships with Windows. No Node.js, no Python, no Electron. No runtime to install, no package manager, no admin rights.
 
 ## Install
 
@@ -46,8 +46,7 @@ git clone https://github.com/Sebastilan/QuickPaths.git
 Then double-click `Install.cmd` in the folder.
 
 All three methods will:
-- Set up auto-start on boot
-- Register a watchdog (auto-restarts within 3 minutes if crashed)
+- Set up auto-start on boot (registry-based, no background services)
 - Launch QuickPaths immediately
 
 ## Usage
@@ -61,12 +60,11 @@ All three methods will:
 
 ## Uninstall
 
-**Double-click `Uninstall.cmd`**. Removes auto-start and watchdog task. You'll be asked whether to keep or delete your saved paths.
+**Double-click `Uninstall.cmd`**. Removes auto-start. You'll be asked whether to keep or delete your saved paths.
 
 ## Requirements
 
-- Windows 10 / 11
-- PowerShell 5.1 (ships with Windows)
+- Windows 10 / 11 (.NET Framework 4.x, ships with Windows)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI for Claude Mode (optional — path copying works without it)
 - No admin rights required
 

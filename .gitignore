@@ -11,9 +11,10 @@ nul
 # Dev-only scripts
 _restart.ps1
 
-# Generated at install/runtime
+# Legacy runtime files
 wrapper.lock
 
 # Build artifacts
-*.exe
-setup.cs
+QuickPaths.exe
+QuickPathsSetup.exe
+*.pdb

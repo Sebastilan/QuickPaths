@@ -1,2 +1,2 @@
 @echo off
-powershell -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"
+"%~dp0QuickPaths.exe" --uninstall
