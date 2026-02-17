@@ -64,6 +64,14 @@ QuickPaths.exe --uninstall  → 停止 + 反注册 + 清理 + 询问删数据 + 
 10. **GDI+ PathGradientBrush 退化路径**：极小半径时可能抛异常，需 try-catch 保护
 11. **SetUnhandledExceptionMode 时序**：必须在创建任何 Form 之前调用，否则抛 InvalidOperationException 且无法捕获（因为异常处理器尚未注册）
 
+## CSDN 文章绑定
+
+| slug | 标题 | 状态 |
+|------|------|------|
+| `quickpaths-claude-launcher` | 【Claude Code】我给 Claude Code 做了个桌面启动器 | 草稿 |
+
+大改后须同步更新文章内容（`csdn-auto-publisher/articles/quickpaths-claude-launcher/content.md`）。
+
 ## CSDN 图床链接
 
 | 图片 | CSDN 图床 URL |
