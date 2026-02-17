@@ -22,7 +22,7 @@ Its rhythm comes from Daoist *tuna* (吐纳) breathwork: inhale 4 s → hold 4 s
 
 Tired from coding, frustrated by a bug, waiting for CI to finish — glance at the quietly breathing dot on your desktop and follow its rhythm for a few cycles. No meditation app needed, no need to leave your desk. A few breath cycles to bring your heart rate down. A dev tool that also looks after your mental state.
 
-**Zero Dependencies** — A single 39 KB native exe, compiled from C# with the .NET Framework csc.exe that ships with Windows. No Node.js, no Python, no Electron. No runtime to install, no package manager, no admin rights.
+**Zero Dependencies** — A single ~40 KB native exe (WinForms + GDI+), compiled from C# with the .NET Framework csc.exe that ships with Windows. ~14 MB memory at runtime. No Node.js, no Python, no Electron. No runtime to install, no package manager, no admin rights.
 
 ## Install
 

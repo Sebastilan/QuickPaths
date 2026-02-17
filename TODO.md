@@ -20,6 +20,7 @@
 - [x] 所有事件处理器 try-catch 保护
 - [x] 增强日志：毫秒时间戳、LogError 完整堆栈、LogCrashContext 运行上下文
 - [x] **v2.0 C# 重写**：PowerShell → 编译型 C# WPF exe，消除 PS 层所有怪癖，砍掉 VBS 崩溃恢复/wrapper.lock，自启动改为注册表，install/uninstall 内置到 exe
+- [x] **v3.0 WPF→WinForms 轻量化重写**：内存从 ~307MB 降至 ~14MB。GDI+ 自绘 ECG 动画，Region 裁剪圆角，保持全部功能兼容
 
 ## 未来可选
 - [ ] 主题切换：深色/浅色自适应

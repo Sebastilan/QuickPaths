@@ -1,9 +1,11 @@
-// QuickPaths.cs - Desktop floating path quick-copy tool
+// QuickPaths.cs - Desktop floating path quick-copy tool (WinForms)
 // Build: build.cmd (csc.exe from .NET Framework 4.x)
 
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -12,15 +14,8 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Effects;
-using System.Windows.Threading;
+using System.Windows.Forms;
 using Microsoft.Win32;
-using Polyline = System.Windows.Shapes.Polyline;
-using Ellipse = System.Windows.Shapes.Ellipse;
 
 // --- JSON data contracts (keys match legacy paths.json / config.json) ---
 
@@ -94,7 +89,7 @@ class FolderMultiPicker
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IShellItemArray
     {
-        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppvOut);
+        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
         void GetPropertyStore(int flags, ref Guid riid, out IntPtr ppv);
         void GetPropertyDescriptionList(IntPtr keyType, ref Guid riid, out IntPtr ppv);
         void GetAttributes(int attribFlags, uint sfgaoMask, out uint psfgaoAttribs);
@@ -110,7 +105,7 @@ class FolderMultiPicker
         {
             uint options;
             dialog.GetOptions(out options);
-            dialog.SetOptions(options | 0x20u | 0x200u | 0x40u); // PICKFOLDERS | ALLOWMULTISELECT | FORCEFILESYSTEM
+            dialog.SetOptions(options | 0x20u | 0x200u | 0x40u);
             if (!string.IsNullOrEmpty(title))
                 dialog.SetTitle(title);
             int hr = dialog.Show(IntPtr.Zero);
@@ -125,7 +120,7 @@ class FolderMultiPicker
                 IShellItem item;
                 results.GetItemAt(i, out item);
                 string path;
-                item.GetDisplayName(0x80058000u, out path); // SIGDN_FILESYSPATH
+                item.GetDisplayName(0x80058000u, out path);
                 if (!string.IsNullOrEmpty(path))
                     paths.Add(path);
             }
@@ -138,68 +133,93 @@ class FolderMultiPicker
     }
 }
 
+// --- Double-buffered panel for flicker-free GDI+ drawing ---
+
+class BufferedPanel : Panel
+{
+    public BufferedPanel()
+    {
+        SetStyle(
+            ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.UserPaint |
+            ControlStyles.OptimizedDoubleBuffer |
+            ControlStyles.ResizeRedraw,
+            true);
+    }
+}
+
 // --- Main application ---
 
 class QuickPaths
 {
-    // P/Invoke for cursor position (replaces System.Windows.Forms dependency)
-    [DllImport("user32.dll")]
-    static extern bool GetCursorPos(out POINT lpPoint);
-    [StructLayout(LayoutKind.Sequential)]
-    struct POINT { public int X, Y; }
-
     // --- Constants ---
+    const int DOT_W = 88, DOT_H = 38;
     const int ECG_PAD_X = 12, ECG_PAD_Y = 8;
     const int ECG_WAVE_W = 60, ECG_WAVE_H = 22;
     const int ECG_COUNT = 360;
     const string MUTEX_NAME = @"Global\QuickPaths_Singleton";
     const string REG_RUN = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 
+    // Panel layout
+    const int P_PAD = 10, P_PAD_V = 8;
+    const int ITEM_H = 32, ITEM_GAP = 4;
+    const int BTN_SZ = 24, BTN_GAP = 3;
+    const int CLAUDE_H = 30, ADD_H = 30;
+    const int SEP_MT = 6, SEP_MB = 4;
+    const int PANEL_MIN_W = 160, PANEL_MAX_W = 280;
+
     // --- State ---
     string dir, dataFile, configFile, logFile;
     List<PathItem> paths = new List<PathItem>();
     bool dialogOpen, expanded, claudeMode, intentionalExit;
-    POINT? dotClickPt;
     int exitCode = 1;
     int restartCount;
     DateTime startTime;
     Mutex mutex;
+    double scale = 1.0;
 
-    // --- UI elements ---
-    Window win;
-    Grid root;
-    Border dot, panel;
-    Canvas canvas;
-    Polyline waveLine;
-    Ellipse penHead, penGlow1, penGlow2;
-    DropShadowEffect penHeadShadow;
-    StackPanel listPanel;
-    ScaleTransform dotScale;
+    // Mouse drag
+    bool mouseIsDown, hasDragged;
+    Point mouseDownScreen, formPosOnDown;
+
+    // --- UI ---
+    Form form;
+    BufferedPanel dotPanel;
+    Panel expandedPanel;
+    ToolTip toolTip;
+
+    // --- Animation ---
     List<double> yValues = new List<double>();
+    int breathTick;
+    bool dotHovered, flashActive;
 
     // --- Timers ---
-    DispatcherTimer breathTimer, flashTimer, displayChangeTimer, healthTimer;
-    int breathTick;
+    System.Windows.Forms.Timer breathTimer, flashTimer, displayChangeTimer, healthTimer;
 
-    // --- System event handlers (stored for unsubscribe) ---
+    // --- System event handlers ---
     PowerModeChangedEventHandler onPowerMode;
     SessionSwitchEventHandler onSessionSwitch;
     EventHandler onDisplayChanged;
 
-    // --- Brushes ---
-    // ECG monitor
-    SolidColorBrush C_MonBg, C_MonHover, C_MonBdrBlue, C_MonBdrOrange;
-    SolidColorBrush C_WaveBlue, C_WaveOrange, C_WaveGreen;
-    SolidColorBrush C_PenBlue, C_PenOrange, C_PenGreen;
-    // Panel
-    SolidColorBrush C_PanelBg, C_ItemNormal, C_ItemHover;
-    SolidColorBrush C_UpNormal, C_UpHover, C_UpText;
-    SolidColorBrush C_DelNormal, C_DelHover, C_DelText;
-    SolidColorBrush C_AddBg, C_AddHover, C_AddText;
-    SolidColorBrush C_Sep;
+    // --- Fonts ---
+    Font fItem, fAdd, fClaude, fHint;
+
+    // --- Colors ---
+    // ECG monitor (alpha-aware, used in GDI+ painting)
+    Color C_MonBg, C_MonHover, C_MonBdrBlue, C_MonBdrOrange;
+    Color C_WaveBlue, C_WaveOrange, C_WaveGreen;
+    Color C_PenBlue, C_PenOrange, C_PenGreen;
+    // Panel (opaque, pre-blended for WinForms controls)
+    Color C_PanelBg, C_ItemNormal, C_ItemHover;
+    Color C_UpNormal, C_UpHover, C_UpText;
+    Color C_DelNormal, C_DelHover, C_DelText;
+    Color C_AddBg, C_AddHover, C_AddText;
+    Color C_Sep;
     // Claude toggle
-    SolidColorBrush C_ClaudeOff, C_ClaudeOn, C_ClaudeHoverOff, C_ClaudeHoverOn;
-    SolidColorBrush C_ClaudeTextOff, C_ClaudeTextOn, C_ClaudeBdrOff, C_ClaudeBdrOn;
+    Color C_ClaudeOff, C_ClaudeOn, C_ClaudeHoverOff, C_ClaudeHoverOn;
+    Color C_ClaudeTextOff, C_ClaudeTextOn;
+    // Current dot drawing colors (depend on claudeMode + flash)
+    Color curWave, curPen, curBorder, curGlow;
 
     // =====================================================================
     //  Entry point
@@ -208,18 +228,20 @@ class QuickPaths
     [STAThread]
     static void Main(string[] args)
     {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
         if (args.Length > 0)
         {
             string a = args[0].ToLowerInvariant();
             if (a == "--install" || a == "/install") { DoInstall(); return; }
             if (a == "--uninstall" || a == "/uninstall") { DoUninstall(); return; }
         }
-        // Parse restart count for crash-loop prevention
         int rc = 0;
         foreach (string arg in args)
             if (arg.StartsWith("--restart-count="))
                 int.TryParse(arg.Substring(16), out rc);
-        if (rc > 0) Thread.Sleep(2000); // delay before restart attempt
+        if (rc > 0) Thread.Sleep(2000);
         var qp = new QuickPaths();
         qp.restartCount = rc;
         qp.Run();
@@ -238,243 +260,118 @@ class QuickPaths
         catch (AbandonedMutexException) { owned = true; }
         if (!owned) { Environment.ExitCode = 0; return; }
 
+        // --- Exception handling (MUST be before any Form creation) ---
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
         // --- Paths ---
         dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         dataFile = Path.Combine(dir, "paths.json");
         configFile = Path.Combine(dir, "config.json");
         logFile = Path.Combine(dir, "QuickPaths.log");
         startTime = DateTime.Now;
-        Log("QuickPaths starting...");
+        Log("QuickPaths starting (WinForms)...");
 
         // --- Data ---
         LoadPaths();
         AppConfig cfg = LoadConfig();
+        scale = cfg.Scale > 0 ? cfg.Scale : 1.0;
 
-        // --- Brushes ---
-        InitBrushes();
+        // --- Colors & Fonts ---
+        InitColors();
+        InitFonts();
+        UpdateDotColors();
 
-        // --- Window ---
-        win = new Window();
-        win.WindowStyle = WindowStyle.None;
-        win.AllowsTransparency = true;
-        win.Background = Brushes.Transparent;
-        win.Topmost = true;
-        win.ShowInTaskbar = false;
-        win.SizeToContent = SizeToContent.WidthAndHeight;
-        win.ResizeMode = ResizeMode.NoResize;
-        win.Left = cfg.Left;
-        win.Top = cfg.Top;
+        // --- Form ---
+        form = new Form();
+        form.FormBorderStyle = FormBorderStyle.None;
+        form.TopMost = true;
+        form.ShowInTaskbar = false;
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new Point(cfg.Left, cfg.Top);
+        form.BackColor = C_MonBg;
+        toolTip = new ToolTip();
 
-        root = new Grid();
+        // --- Dot panel ---
+        dotPanel = new BufferedPanel();
+        dotPanel.Dock = DockStyle.Fill;
+        dotPanel.Paint += OnDotPaint;
+        dotPanel.MouseDown += OnDotMouseDown;
+        dotPanel.MouseMove += OnDotMouseMove;
+        dotPanel.MouseUp += OnDotMouseUp;
+        dotPanel.MouseWheel += OnDotMouseWheel;
+        dotPanel.MouseEnter += delegate { dotHovered = true; dotPanel.Invalidate(); };
+        dotPanel.MouseLeave += delegate { dotHovered = false; dotPanel.Invalidate(); };
+        dotPanel.Cursor = Cursors.Hand;
+        form.Controls.Add(dotPanel);
 
-        // --- ECG dot ---
-        double initialScale = cfg.Scale > 0 ? cfg.Scale : 1.0;
-        dotScale = new ScaleTransform(initialScale, initialScale);
-
-        dot = new Border();
-        dot.Width = 88;
-        dot.Height = 38;
-        dot.CornerRadius = new CornerRadius(6);
-        dot.Background = C_MonBg;
-        dot.Cursor = Cursors.Hand;
-        dot.BorderThickness = new Thickness(1);
-        dot.LayoutTransform = dotScale;
-        dot.Effect = new DropShadowEffect
-        {
-            BlurRadius = 12, ShadowDepth = 1, Opacity = 0.35,
-            Color = Colors.Black
-        };
-
-        canvas = new Canvas();
-        canvas.ClipToBounds = false;
-        canvas.IsHitTestVisible = false;
-        dot.Child = canvas;
-
-        // Waveform polyline (360 points scrolling left)
+        // Init waveform data
         double yBot = ECG_PAD_Y + ECG_WAVE_H;
-        waveLine = new Polyline();
-        waveLine.StrokeThickness = 1.5;
-        waveLine.IsHitTestVisible = false;
-
         yValues.Clear();
-        var initPts = new PointCollection();
         for (int i = 0; i < ECG_COUNT; i++)
-        {
             yValues.Add(yBot);
-            double x = ECG_PAD_X + ECG_WAVE_W * (double)i / (ECG_COUNT - 1);
-            initPts.Add(new Point(x, yBot));
-        }
-        waveLine.Points = initPts;
-        canvas.Children.Add(waveLine);
 
-        // Pen head glow layers (outer -> middle -> head, painted in order)
-        double glowRX = ECG_PAD_X + ECG_WAVE_W; // right-edge X anchor
+        ApplyDotSize();
+        Log("Window built at (" + cfg.Left + ", " + cfg.Top + ")");
 
-        penGlow2 = new Ellipse();
-        penGlow2.Width = 30;
-        penGlow2.Height = 30;
-        penGlow2.IsHitTestVisible = false;
-        penGlow2.Opacity = 0.0;
-        Canvas.SetLeft(penGlow2, glowRX - 15);
-        Canvas.SetTop(penGlow2, yBot - 15);
-        canvas.Children.Add(penGlow2);
-
-        penGlow1 = new Ellipse();
-        penGlow1.Width = 16;
-        penGlow1.Height = 16;
-        penGlow1.IsHitTestVisible = false;
-        penGlow1.Opacity = 0.0;
-        Canvas.SetLeft(penGlow1, glowRX - 8);
-        Canvas.SetTop(penGlow1, yBot - 8);
-        canvas.Children.Add(penGlow1);
-
-        penHead = new Ellipse();
-        penHead.Width = 6;
-        penHead.Height = 6;
-        penHead.IsHitTestVisible = false;
-        penHeadShadow = new DropShadowEffect
-        {
-            BlurRadius = 15, ShadowDepth = 0, Opacity = 0.8
-        };
-        penHead.Effect = penHeadShadow;
-        Canvas.SetLeft(penHead, glowRX - 3);
-        Canvas.SetTop(penHead, yBot - 3);
-        canvas.Children.Add(penHead);
-
-        // --- Breath timer (50ms tick, 18s cycle) ---
-        breathTimer = new DispatcherTimer();
-        breathTimer.Interval = TimeSpan.FromMilliseconds(50);
+        // --- Timers ---
+        breathTimer = new System.Windows.Forms.Timer();
+        breathTimer.Interval = 50;
         breathTimer.Tick += OnBreathTick;
+        breathTimer.Start();
 
-        UpdateDotAppearance(); // sets colors, starts breathTimer
-
-        // --- Panel ---
-        panel = new Border();
-        panel.CornerRadius = new CornerRadius(12);
-        panel.Background = C_PanelBg;
-        panel.Padding = new Thickness(10, 8, 10, 8);
-        panel.MinWidth = 160;
-        panel.MaxWidth = 280;
-        panel.Visibility = Visibility.Collapsed;
-        panel.Effect = new DropShadowEffect
-        {
-            BlurRadius = 20, ShadowDepth = 2, Opacity = 0.40,
-            Color = Colors.Black
-        };
-
-        listPanel = new StackPanel();
-        panel.Child = listPanel;
-
-        root.Children.Add(dot);
-        root.Children.Add(panel);
-        win.Content = root;
-        Log("Window built at (" + (int)win.Left + ", " + (int)win.Top + ")");
-
-        // --- Flash timer ---
-        flashTimer = new DispatcherTimer();
-        flashTimer.Interval = TimeSpan.FromMilliseconds(700);
+        flashTimer = new System.Windows.Forms.Timer();
+        flashTimer.Interval = 700;
         flashTimer.Tick += delegate
         {
             try
             {
-                if (claudeMode)
-                {
-                    waveLine.Stroke = C_WaveOrange;
-                    penHead.Fill = C_PenOrange;
-                }
-                else
-                {
-                    waveLine.Stroke = C_WaveBlue;
-                    penHead.Fill = C_PenBlue;
-                }
+                flashActive = false;
+                UpdateDotColors();
+                dotPanel.Invalidate();
                 flashTimer.Stop();
             }
             catch (Exception ex) { Log("flashTimer error: " + ex.Message); flashTimer.Stop(); }
         };
 
-        // --- Dot events ---
-        dot.MouseEnter += delegate { try { dot.Background = C_MonHover; } catch { } };
-        dot.MouseLeave += delegate { try { dot.Background = C_MonBg; } catch { } };
-
-        dot.MouseLeftButtonDown += delegate
+        displayChangeTimer = new System.Windows.Forms.Timer();
+        displayChangeTimer.Interval = 1500;
+        displayChangeTimer.Tick += delegate
         {
             try
             {
-                POINT pt;
-                GetCursorPos(out pt);
-                dotClickPt = pt;
-            }
-            catch { }
-        };
-
-        dot.MouseMove += delegate(object s, MouseEventArgs e)
-        {
-            try
-            {
-                if (e.LeftButton == MouseButtonState.Pressed && dotClickPt.HasValue)
+                displayChangeTimer.Stop();
+                Rectangle vs = SystemInformation.VirtualScreen;
+                int wl = form.Left, wt = form.Top;
+                Log("DisplayChange settled: Window=(" + wl + "," + wt
+                    + ") VirtualScreen=(" + vs.X + "," + vs.Y + "," + vs.Width + "," + vs.Height + ")");
+                if (wl < vs.Left || wl > vs.Right - 30 || wt < vs.Top || wt > vs.Bottom - 30)
                 {
-                    POINT cur;
-                    GetCursorPos(out cur);
-                    if (Math.Abs(cur.X - dotClickPt.Value.X) > 5 ||
-                        Math.Abs(cur.Y - dotClickPt.Value.Y) > 5)
-                    {
-                        dotClickPt = null;
-                        win.DragMove();
-                        SaveConfig();
-                    }
+                    Log("Window off-screen, resetting");
+                    Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                    form.Left = wa.Right - 60;
+                    form.Top = wa.Top + (int)(wa.Height * 0.4);
+                    SaveConfig();
                 }
+                form.TopMost = false;
+                form.TopMost = true;
             }
-            catch (Exception ex) { Log("dot.MouseMove error: " + ex.Message); }
+            catch (Exception ex) { Log("displayChangeTimer error: " + ex.Message); }
         };
 
-        dot.MouseLeftButtonUp += delegate
+        healthTimer = new System.Windows.Forms.Timer();
+        healthTimer.Interval = 300000;
+        healthTimer.Tick += delegate
         {
-            try
-            {
-                if (dotClickPt.HasValue) Expand();
-                dotClickPt = null;
-            }
-            catch (Exception ex) { Log("dot.MouseUp error: " + ex.Message); }
+            try { form.TopMost = false; form.TopMost = true; }
+            catch (Exception ex) { Log("healthTimer error: " + ex.Message); }
         };
+        healthTimer.Start();
 
-        // Scroll wheel to resize dot
-        dot.MouseWheel += delegate(object s, MouseWheelEventArgs e)
-        {
-            try
-            {
-                double delta = e.Delta > 0 ? 0.1 : -0.1;
-                double ns = Math.Round(dotScale.ScaleX + delta, 1);
-                ns = Math.Max(0.5, Math.Min(3.0, ns));
-                dotScale.ScaleX = ns;
-                dotScale.ScaleY = ns;
-                SaveConfig();
-            }
-            catch (Exception ex) { Log("dot.MouseWheel error: " + ex.Message); }
-        };
-
-        // Right-click dot to exit
-        dot.MouseRightButtonUp += delegate
-        {
-            try
-            {
-                var r = MessageBox.Show(
-                    "\u9000\u51FA QuickPaths\uFF1F", "\u786E\u8BA4",
-                    MessageBoxButton.YesNo, MessageBoxImage.Question);
-                if (r == MessageBoxResult.Yes)
-                {
-                    intentionalExit = true;
-                    exitCode = 0;
-                    win.Close();
-                }
-            }
-            catch (Exception ex) { Log("RightClick error: " + ex.Message); }
-        };
-
-        // Click outside to collapse
-        win.Deactivated += delegate
+        // --- Click-outside-to-collapse ---
+        form.Deactivate += delegate
         {
             try { if (expanded && !dialogOpen) Collapse(); }
-            catch (Exception ex) { Log("Deactivated error: " + ex.Message); }
+            catch (Exception ex) { Log("Deactivate error: " + ex.Message); }
         };
 
         // --- System events ---
@@ -506,41 +403,12 @@ class QuickPaths
         };
         SystemEvents.SessionSwitch += onSessionSwitch;
 
-        // Display hotplug (1500ms debounce)
-        displayChangeTimer = new DispatcherTimer();
-        displayChangeTimer.Interval = TimeSpan.FromMilliseconds(1500);
-        displayChangeTimer.Tick += delegate
-        {
-            try
-            {
-                displayChangeTimer.Stop();
-                double vl = SystemParameters.VirtualScreenLeft;
-                double vt = SystemParameters.VirtualScreenTop;
-                double vw = SystemParameters.VirtualScreenWidth;
-                double vh = SystemParameters.VirtualScreenHeight;
-                double wl = win.Left, wt = win.Top;
-                Log("DisplayChange settled: Window=(" + (int)wl + "," + (int)wt
-                    + ") VirtualScreen=(" + (int)vl + "," + (int)vt + "," + (int)vw + "," + (int)vh + ")");
-                if (wl < vl || wl > vl + vw - 30 || wt < vt || wt > vt + vh - 30)
-                {
-                    Log("Window off-screen, resetting");
-                    Rect wa = SystemParameters.WorkArea;
-                    win.Left = wa.Width - 60;
-                    win.Top = wa.Height * 0.4;
-                    SaveConfig();
-                }
-                win.Topmost = false;
-                win.Topmost = true;
-            }
-            catch (Exception ex) { Log("displayChangeTimer error: " + ex.Message); }
-        };
-
         onDisplayChanged = delegate
         {
             try
             {
                 Log("Display settings changed (debouncing...)");
-                win.Dispatcher.BeginInvoke((Action)delegate
+                form.BeginInvoke((Action)delegate
                 {
                     displayChangeTimer.Stop();
                     displayChangeTimer.Start();
@@ -550,20 +418,10 @@ class QuickPaths
         };
         SystemEvents.DisplaySettingsChanged += onDisplayChanged;
 
-        // Health timer: re-assert Topmost every 5 minutes
-        healthTimer = new DispatcherTimer();
-        healthTimer.Interval = TimeSpan.FromMinutes(5);
-        healthTimer.Tick += delegate
+        // --- Form closed cleanup ---
+        form.FormClosed += delegate
         {
-            try { win.Topmost = false; win.Topmost = true; }
-            catch (Exception ex) { Log("healthTimer error: " + ex.Message); }
-        };
-        healthTimer.Start();
-
-        // --- Window.Closed cleanup ---
-        win.Closed += delegate
-        {
-            Log("Window closed (intentional=" + intentionalExit + " exitCode=" + exitCode + ")");
+            Log("Form closed (intentional=" + intentionalExit + " exitCode=" + exitCode + ")");
             healthTimer.Stop();
             breathTimer.Stop();
             displayChangeTimer.Stop();
@@ -573,29 +431,25 @@ class QuickPaths
             try { SystemEvents.SessionSwitch -= onSessionSwitch; } catch { }
             try { SystemEvents.DisplaySettingsChanged -= onDisplayChanged; } catch { }
             try { mutex.ReleaseMutex(); } catch { }
+            DisposeFonts();
         };
 
-        // --- Launch ---
-        Log("Launching...");
-        var app = new Application();
-
-        app.DispatcherUnhandledException += delegate(object sender, DispatcherUnhandledExceptionEventArgs e)
+        // --- Exception handling ---
+        Application.ThreadException += delegate(object sender, System.Threading.ThreadExceptionEventArgs e)
         {
-            e.Handled = true;
-            LogError("Dispatcher.UnhandledException", e.Exception);
+            LogError("ThreadException", e.Exception);
             LogCrashContext();
             string msg = e.Exception.GetType().FullName + " " + e.Exception.Message;
-            bool fatal = msg.Contains("DUCE") || msg.Contains("Render") || msg.Contains("UCEERR")
-                         || msg.Contains("COMException") || msg.Contains("OutOfMemoryException");
+            bool fatal = msg.Contains("OutOfMemoryException") || msg.Contains("AccessViolation");
             if (fatal)
             {
-                Log("FATAL dispatcher error \u2014 closing for restart");
+                Log("FATAL thread error \u2014 closing for restart");
                 exitCode = 2;
-                try { win.Close(); } catch { }
+                try { form.Close(); } catch { }
             }
             else
             {
-                Log("Non-fatal dispatcher error \u2014 handled, continuing");
+                Log("Non-fatal thread error \u2014 handled, continuing");
             }
         };
 
@@ -605,12 +459,14 @@ class QuickPaths
             if (ex != null) LogError("AppDomain.UnhandledException", ex);
             LogCrashContext();
             exitCode = 3;
-            try { win.Close(); } catch { }
+            try { form.Close(); } catch { }
         };
 
+        // --- Launch ---
+        Log("Launching...");
         try
         {
-            app.Run(win);
+            Application.Run(form);
         }
         catch (Exception ex)
         {
@@ -620,7 +476,7 @@ class QuickPaths
         }
         Log("Exiting with code " + exitCode);
 
-        // Self-restart on crash (up to 5 attempts, then wait for keepalive task)
+        // Self-restart on crash (up to 5 attempts)
         if (exitCode != 0 && restartCount < 5)
         {
             Log("Scheduling restart (attempt " + (restartCount + 1) + "/5)...");
@@ -640,122 +496,338 @@ class QuickPaths
     }
 
     // =====================================================================
-    //  UI logic
+    //  Dot sizing & region
     // =====================================================================
 
-    void Collapse()
+    void ApplyDotSize()
     {
-        expanded = false;
-        panel.Visibility = Visibility.Collapsed;
-        dot.Visibility = Visibility.Visible;
+        int w = (int)(DOT_W * scale);
+        int h = (int)(DOT_H * scale);
+        form.ClientSize = new Size(w, h);
+        form.Region = MakeRoundedRegion(w, h, (int)(6 * scale));
+        form.BackColor = C_MonBg;
     }
 
-    void Expand()
+    static Region MakeRoundedRegion(int w, int h, int r)
     {
-        expanded = true;
-        dot.Visibility = Visibility.Collapsed;
-        RebuildList();
-        panel.Visibility = Visibility.Visible;
+        if (r < 1) r = 1;
+        var path = new GraphicsPath();
+        int d = r * 2;
+        path.AddArc(0, 0, d, d, 180, 90);
+        path.AddArc(w - d, 0, d, d, 270, 90);
+        path.AddArc(w - d, h - d, d, d, 0, 90);
+        path.AddArc(0, h - d, d, d, 90, 90);
+        path.CloseFigure();
+        return new Region(path);
     }
 
-    void FlashDot()
-    {
-        flashTimer.Stop();
-        waveLine.Stroke = C_WaveGreen;
-        penHead.Fill = C_PenGreen;
-        flashTimer.Start();
-    }
+    // =====================================================================
+    //  Dot painting (GDI+)
+    // =====================================================================
 
-    void ReassertTopmost()
+    void OnDotPaint(object sender, PaintEventArgs e)
     {
-        win.Dispatcher.BeginInvoke((Action)delegate
+        try
         {
-            win.Topmost = false;
-            win.Topmost = true;
-        });
-    }
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float s = (float)scale;
+            int w = dotPanel.Width;
+            int h = dotPanel.Height;
+            int cr = (int)(6 * s);
 
-    void UpdateDotAppearance()
-    {
-        if (claudeMode)
-        {
-            dot.BorderBrush = C_MonBdrOrange;
-            waveLine.Stroke = C_WaveOrange;
-            penHead.Fill = C_PenOrange;
-            penHeadShadow.Color = Color.FromRgb(217, 119, 87);
-            Color cOrange = Color.FromRgb(217, 119, 87);
-            penGlow1.Fill = MakeGlowBrush(cOrange, 0.7, 0.0);
-            penGlow2.Fill = MakeGlowBrush(cOrange, 0.4, 0.0);
+            // Background
+            Color bg = dotHovered ? C_MonHover : C_MonBg;
+            using (var bgPath = MakeRoundedRectPath(0, 0, w, h, cr))
+            using (var bgBrush = new SolidBrush(bg))
+            {
+                g.FillPath(bgBrush, bgPath);
+            }
+
+            // Border
+            using (var bdrPath = MakeRoundedRectPath(0, 0, w - 1, h - 1, cr))
+            using (var bdrPen = new Pen(curBorder, 1f))
+            {
+                g.DrawPath(bdrPen, bdrPath);
+            }
+
+            // Waveform
+            float padX = ECG_PAD_X * s;
+            float padY = ECG_PAD_Y * s;
+            float waveW = ECG_WAVE_W * s;
+            float waveH = ECG_WAVE_H * s;
+
+            if (yValues.Count >= 2)
+            {
+                var pts = new PointF[ECG_COUNT];
+                for (int i = 0; i < ECG_COUNT; i++)
+                {
+                    float x = padX + waveW * (float)i / (ECG_COUNT - 1);
+                    float y = (float)(yValues[i] * s);
+                    pts[i] = new PointF(x, y);
+                }
+                using (var wavePen = new Pen(curWave, 1.5f * s))
+                {
+                    g.DrawLines(wavePen, pts);
+                }
+            }
+
+            // Pen head position
+            float headY = (float)(yValues[yValues.Count - 1] * s);
+            float headX = padX + waveW;
+            float headR = 3f * s;
+
+            // Glow layers
+            float breathVal = (float)GetCurrentBreathValue();
+
+            // Outer glow (30px unscaled)
+            float glow2R = 15f * s;
+            float glow2Alpha = (float)(0.08 + 0.30 * breathVal);
+            DrawGlow(g, headX, headY, glow2R, curGlow, glow2Alpha);
+
+            // Inner glow (16px unscaled)
+            float glow1R = 8f * s;
+            float glow1Alpha = (float)(0.18 + 0.50 * breathVal);
+            DrawGlow(g, headX, headY, glow1R, curGlow, glow1Alpha);
+
+            // Pen head circle
+            float shadowAlpha = (float)(0.4 + 0.55 * breathVal);
+            // Shadow (slightly larger, semi-transparent)
+            using (var shadowBrush = new SolidBrush(Color.FromArgb((int)(shadowAlpha * 120), curGlow)))
+            {
+                float sr = headR + 4f * s;
+                g.FillEllipse(shadowBrush, headX - sr, headY - sr, sr * 2, sr * 2);
+            }
+            // Head
+            using (var headBrush = new SolidBrush(curPen))
+            {
+                g.FillEllipse(headBrush, headX - headR, headY - headR, headR * 2, headR * 2);
+            }
         }
+        catch (Exception ex)
+        {
+            Log("OnDotPaint error: " + ex.Message);
+        }
+    }
+
+    void DrawGlow(Graphics g, float cx, float cy, float radius, Color color, float alpha)
+    {
+        if (radius < 1f || alpha < 0.01f) return;
+        RectangleF rect = new RectangleF(cx - radius, cy - radius, radius * 2, radius * 2);
+        using (var path = new GraphicsPath())
+        {
+            path.AddEllipse(rect);
+            try
+            {
+                using (var brush = new PathGradientBrush(path))
+                {
+                    int a = (int)Math.Min(255, alpha * 255);
+                    brush.CenterColor = Color.FromArgb(a, color);
+                    brush.SurroundColors = new Color[] { Color.FromArgb(0, color) };
+                    g.FillPath(brush, path);
+                }
+            }
+            catch { } // PathGradientBrush can fail on degenerate paths
+        }
+    }
+
+    static GraphicsPath MakeRoundedRectPath(int x, int y, int w, int h, int r)
+    {
+        var path = new GraphicsPath();
+        int d = r * 2;
+        if (d > w) d = w;
+        if (d > h) d = h;
+        path.AddArc(x, y, d, d, 180, 90);
+        path.AddArc(x + w - d, y, d, d, 270, 90);
+        path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+        path.AddArc(x, y + h - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    double GetCurrentBreathValue()
+    {
+        int k = breathTick;
+        if (k < 80)
+            return (1 - Math.Cos(k / 80.0 * Math.PI)) / 2;
+        else if (k < 160)
+            return 1.0;
+        else if (k < 320)
+            return (1 + Math.Cos((k - 160) / 160.0 * Math.PI)) / 2;
         else
-        {
-            dot.BorderBrush = C_MonBdrBlue;
-            waveLine.Stroke = C_WaveBlue;
-            penHead.Fill = C_PenBlue;
-            penHeadShadow.Color = Color.FromRgb(106, 155, 204);
-            Color cBlue = Color.FromRgb(106, 155, 204);
-            penGlow1.Fill = MakeGlowBrush(cBlue, 0.7, 0.0);
-            penGlow2.Fill = MakeGlowBrush(cBlue, 0.4, 0.0);
-        }
-        if (!breathTimer.IsEnabled)
-        {
-            breathTick = 0;
-            breathTimer.Start();
-        }
+            return 0.0;
     }
 
-    RadialGradientBrush MakeGlowBrush(Color c, double centerAlpha, double edgeAlpha)
-    {
-        Color center = Color.FromArgb((byte)Math.Min(255, centerAlpha * 255), c.R, c.G, c.B);
-        Color edge = Color.FromArgb((byte)Math.Min(255, edgeAlpha * 255), c.R, c.G, c.B);
-        var brush = new RadialGradientBrush();
-        brush.GradientStops.Add(new GradientStop(center, 0.0));
-        brush.GradientStops.Add(new GradientStop(edge, 1.0));
-        return brush;
-    }
+    // =====================================================================
+    //  Breath animation timer
+    // =====================================================================
 
-    // --- Breath timer tick ---
     void OnBreathTick(object sender, EventArgs e)
     {
         try
         {
             breathTick++;
             if (breathTick >= 360) breathTick = 0;
-            int k = breathTick;
-            double v;
-            if (k < 80)
-                v = (1 - Math.Cos(k / 80.0 * Math.PI)) / 2; // inhale 4s
-            else if (k < 160)
-                v = 1.0; // hold 4s
-            else if (k < 320)
-                v = (1 + Math.Cos((k - 160) / 160.0 * Math.PI)) / 2; // exhale 8s
-            else
-                v = 0.0; // rest 2s
 
+            double v = GetCurrentBreathValue();
             double y = ECG_PAD_Y + ECG_WAVE_H * (1 - v);
             yValues.RemoveAt(0);
             yValues.Add(y);
 
-            var pts = new PointCollection();
-            for (int i = 0; i < ECG_COUNT; i++)
-            {
-                double x = ECG_PAD_X + ECG_WAVE_W * (double)i / (ECG_COUNT - 1);
-                pts.Add(new Point(x, yValues[i]));
-            }
-            waveLine.Points = pts;
-
-            Canvas.SetTop(penHead, y - 3);
-            Canvas.SetTop(penGlow1, y - 8);
-            Canvas.SetTop(penGlow2, y - 15);
-
-            penHeadShadow.Opacity = 0.4 + 0.55 * v;
-            penGlow1.Opacity = 0.18 + 0.50 * v;
-            penGlow2.Opacity = 0.08 + 0.30 * v;
+            if (!expanded)
+                dotPanel.Invalidate();
         }
         catch (Exception ex)
         {
             Log("breathTimer error: " + ex.Message);
             breathTimer.Stop();
+        }
+    }
+
+    // =====================================================================
+    //  Dot mouse events
+    // =====================================================================
+
+    void OnDotMouseDown(object sender, MouseEventArgs e)
+    {
+        try
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                mouseIsDown = true;
+                mouseDownScreen = Control.MousePosition;
+                formPosOnDown = form.Location;
+                hasDragged = false;
+            }
+        }
+        catch { }
+    }
+
+    void OnDotMouseMove(object sender, MouseEventArgs e)
+    {
+        try
+        {
+            if (mouseIsDown && e.Button == MouseButtons.Left)
+            {
+                Point cur = Control.MousePosition;
+                int dx = cur.X - mouseDownScreen.X;
+                int dy = cur.Y - mouseDownScreen.Y;
+                if (!hasDragged && (Math.Abs(dx) > 5 || Math.Abs(dy) > 5))
+                    hasDragged = true;
+                if (hasDragged)
+                    form.Location = new Point(formPosOnDown.X + dx, formPosOnDown.Y + dy);
+            }
+        }
+        catch (Exception ex) { Log("dot.MouseMove error: " + ex.Message); }
+    }
+
+    void OnDotMouseUp(object sender, MouseEventArgs e)
+    {
+        try
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                if (!hasDragged)
+                    Expand();
+                else
+                    SaveConfig();
+                mouseIsDown = false;
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                var r = MessageBox.Show(
+                    "\u9000\u51FA QuickPaths\uFF1F", "\u786E\u8BA4",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (r == DialogResult.Yes)
+                {
+                    intentionalExit = true;
+                    exitCode = 0;
+                    form.Close();
+                }
+            }
+        }
+        catch (Exception ex) { Log("dot.MouseUp error: " + ex.Message); }
+    }
+
+    void OnDotMouseWheel(object sender, MouseEventArgs e)
+    {
+        try
+        {
+            double delta = e.Delta > 0 ? 0.1 : -0.1;
+            double ns = Math.Round(scale + delta, 1);
+            ns = Math.Max(0.5, Math.Min(3.0, ns));
+            scale = ns;
+            ApplyDotSize();
+            dotPanel.Invalidate();
+            SaveConfig();
+        }
+        catch (Exception ex) { Log("dot.MouseWheel error: " + ex.Message); }
+    }
+
+    // =====================================================================
+    //  UI state transitions
+    // =====================================================================
+
+    void Collapse()
+    {
+        expanded = false;
+        form.SuspendLayout();
+        if (expandedPanel != null)
+        {
+            form.Controls.Remove(expandedPanel);
+            expandedPanel.Dispose();
+            expandedPanel = null;
+        }
+        dotPanel.Visible = true;
+        ApplyDotSize();
+        form.ResumeLayout(true);
+    }
+
+    void Expand()
+    {
+        expanded = true;
+        form.SuspendLayout();
+        dotPanel.Visible = false;
+        RebuildList();
+        form.ResumeLayout(true);
+        form.Activate();
+    }
+
+    void FlashDot()
+    {
+        flashTimer.Stop();
+        flashActive = true;
+        curWave = C_WaveGreen;
+        curPen = C_PenGreen;
+        dotPanel.Invalidate();
+        flashTimer.Start();
+    }
+
+    void ReassertTopmost()
+    {
+        form.BeginInvoke((Action)delegate
+        {
+            form.TopMost = false;
+            form.TopMost = true;
+        });
+    }
+
+    void UpdateDotColors()
+    {
+        if (flashActive) return; // don't override flash
+        if (claudeMode)
+        {
+            curBorder = C_MonBdrOrange;
+            curWave = C_WaveOrange;
+            curPen = C_PenOrange;
+            curGlow = Color.FromArgb(217, 119, 87);
+        }
+        else
+        {
+            curBorder = C_MonBdrBlue;
+            curWave = C_WaveBlue;
+            curPen = C_PenBlue;
+            curGlow = Color.FromArgb(106, 155, 204);
         }
     }
 
@@ -778,106 +850,93 @@ class QuickPaths
         }
         if (removed > 0) SavePaths();
 
-        listPanel.Children.Clear();
+        // Remove old panel
+        if (expandedPanel != null)
+        {
+            form.Controls.Remove(expandedPanel);
+            expandedPanel.Dispose();
+        }
+
+        expandedPanel = new Panel();
+        expandedPanel.BackColor = C_PanelBg;
+        expandedPanel.Dock = DockStyle.Fill;
+
+        // Calculate panel width
+        int panelW = PANEL_MIN_W;
+        foreach (var p in paths)
+        {
+            int tw = TextRenderer.MeasureText(p.Name, fItem).Width;
+            int rowW = P_PAD + tw + 20 + BTN_GAP + BTN_SZ + BTN_GAP + BTN_SZ + P_PAD;
+            if (rowW > panelW) panelW = rowW;
+        }
+        panelW = Math.Max(PANEL_MIN_W, Math.Min(PANEL_MAX_W, panelW));
+        int contentW = panelW - P_PAD * 2;
+
+        int y = P_PAD_V;
 
         // --- Claude mode toggle ---
-        var claudeBtn = new Border();
-        claudeBtn.Padding = new Thickness(10, 6, 10, 6);
-        claudeBtn.CornerRadius = new CornerRadius(7);
+        var claudeBtn = new Label();
+        claudeBtn.Text = "Claude";
+        claudeBtn.Font = fClaude;
+        claudeBtn.TextAlign = ContentAlignment.MiddleCenter;
         claudeBtn.Cursor = Cursors.Hand;
-        claudeBtn.Margin = new Thickness(0, 0, 0, 4);
-
-        var claudeText = new TextBlock();
-        claudeText.Text = "Claude";
-        claudeText.FontSize = 13;
-        claudeText.FontWeight = FontWeights.Medium;
-        claudeText.HorizontalAlignment = HorizontalAlignment.Center;
-        claudeText.IsHitTestVisible = false;
-        claudeBtn.Child = claudeText;
-
-        if (claudeMode)
+        claudeBtn.SetBounds(P_PAD, y, contentW, CLAUDE_H);
+        claudeBtn.BackColor = claudeMode ? C_ClaudeOn : C_ClaudeOff;
+        claudeBtn.ForeColor = claudeMode ? C_ClaudeTextOn : C_ClaudeTextOff;
+        claudeBtn.MouseEnter += delegate(object s, EventArgs ev)
         {
-            claudeBtn.Background = C_ClaudeOn;
-            claudeBtn.BorderBrush = C_ClaudeBdrOn;
-            claudeBtn.BorderThickness = new Thickness(1.5);
-            claudeText.Foreground = C_ClaudeTextOn;
-            claudeBtn.Effect = new DropShadowEffect
-            {
-                BlurRadius = 20, ShadowDepth = 0, Opacity = 0.7,
-                Color = Color.FromRgb(217, 119, 87)
-            };
-        }
-        else
-        {
-            claudeBtn.Background = C_ClaudeOff;
-            claudeBtn.BorderBrush = C_ClaudeBdrOff;
-            claudeBtn.BorderThickness = new Thickness(1);
-            claudeText.Foreground = C_ClaudeTextOff;
-            claudeBtn.Effect = null;
-        }
-
-        claudeBtn.MouseEnter += delegate(object s, MouseEventArgs ev)
-        {
-            ((Border)s).Background = claudeMode ? C_ClaudeHoverOn : C_ClaudeHoverOff;
+            ((Label)s).BackColor = claudeMode ? C_ClaudeHoverOn : C_ClaudeHoverOff;
         };
-        claudeBtn.MouseLeave += delegate(object s, MouseEventArgs ev)
+        claudeBtn.MouseLeave += delegate(object s, EventArgs ev)
         {
-            ((Border)s).Background = claudeMode ? C_ClaudeOn : C_ClaudeOff;
+            ((Label)s).BackColor = claudeMode ? C_ClaudeOn : C_ClaudeOff;
         };
-        claudeBtn.MouseLeftButtonDown += delegate
+        claudeBtn.Click += delegate
         {
             claudeMode = !claudeMode;
             SaveConfig();
-            UpdateDotAppearance();
+            UpdateDotColors();
             RebuildList();
         };
-        listPanel.Children.Add(claudeBtn);
+        expandedPanel.Controls.Add(claudeBtn);
+        y += CLAUDE_H + ITEM_GAP;
 
         // --- Empty hint ---
         if (paths.Count == 0)
         {
-            var hint = new TextBlock();
-            hint.Text = "\u70B9\u51FB + "; // "点击 + "
-            hint.Foreground = Br(80, 140, 140, 140);
-            hint.FontSize = 12;
-            hint.HorizontalAlignment = HorizontalAlignment.Center;
-            hint.Margin = new Thickness(8, 4, 8, 2);
-            listPanel.Children.Add(hint);
+            var hint = new Label();
+            hint.Text = "\u70B9\u51FB + ";
+            hint.Font = fHint;
+            hint.ForeColor = Color.FromArgb(140, 140, 140);
+            hint.BackColor = C_PanelBg;
+            hint.TextAlign = ContentAlignment.MiddleCenter;
+            hint.SetBounds(P_PAD, y, contentW, 20);
+            expandedPanel.Controls.Add(hint);
+            y += 20 + ITEM_GAP;
         }
 
         // --- Path items ---
         for (int idx = 0; idx < paths.Count; idx++)
         {
             PathItem item = paths[idx];
-            var row = new DockPanel();
-            row.Margin = new Thickness(0, 2, 0, 2);
+            int btnY = y + (ITEM_H - BTN_SZ) / 2;
+            int rightEdge = P_PAD + contentW;
 
-            // Delete button (rightmost)
-            var del = new Border();
-            del.Width = 24;
-            del.Height = 24;
-            del.CornerRadius = new CornerRadius(12);
-            del.Background = C_DelNormal;
+            // Delete button
+            var del = new Label();
+            del.Text = "\u2212";
+            del.Font = fItem;
+            del.ForeColor = C_DelText;
+            del.BackColor = C_DelNormal;
+            del.TextAlign = ContentAlignment.MiddleCenter;
             del.Cursor = Cursors.Hand;
             del.Tag = item.ItemPath;
-            del.Margin = new Thickness(3, 0, 0, 0);
-            DockPanel.SetDock(del, Dock.Right);
-
-            var delText = new TextBlock();
-            delText.Text = "\u2212"; // minus sign
-            delText.Foreground = C_DelText;
-            delText.FontSize = 14;
-            delText.FontWeight = FontWeights.Medium;
-            delText.HorizontalAlignment = HorizontalAlignment.Center;
-            delText.VerticalAlignment = VerticalAlignment.Center;
-            delText.IsHitTestVisible = false;
-            del.Child = delText;
-
-            del.MouseEnter += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_DelHover; };
-            del.MouseLeave += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_DelNormal; };
-            del.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs ev)
+            del.SetBounds(rightEdge - BTN_SZ, btnY, BTN_SZ, BTN_SZ);
+            del.MouseEnter += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_DelHover; };
+            del.MouseLeave += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_DelNormal; };
+            del.Click += delegate(object s, EventArgs ev)
             {
-                string target = (string)((Border)s).Tag;
+                string target = (string)((Label)s).Tag;
                 for (int i = paths.Count - 1; i >= 0; i--)
                 {
                     if (paths[i].ItemPath == target) { paths.RemoveAt(i); break; }
@@ -885,35 +944,26 @@ class QuickPaths
                 SavePaths();
                 RebuildList();
             };
-            row.Children.Add(del);
+            expandedPanel.Controls.Add(del);
+            int nameRight = rightEdge - BTN_SZ - BTN_GAP;
 
             // Move-up button
             if (idx > 0)
             {
-                var up = new Border();
-                up.Width = 24;
-                up.Height = 24;
-                up.CornerRadius = new CornerRadius(12);
-                up.Background = C_UpNormal;
+                var up = new Label();
+                up.Text = "\u2191";
+                up.Font = fItem;
+                up.ForeColor = C_UpText;
+                up.BackColor = C_UpNormal;
+                up.TextAlign = ContentAlignment.MiddleCenter;
                 up.Cursor = Cursors.Hand;
                 up.Tag = item.ItemPath;
-                up.Margin = new Thickness(3, 0, 0, 0);
-                DockPanel.SetDock(up, Dock.Right);
-
-                var upText = new TextBlock();
-                upText.Text = "\u2191"; // up arrow
-                upText.Foreground = C_UpText;
-                upText.FontSize = 13;
-                upText.HorizontalAlignment = HorizontalAlignment.Center;
-                upText.VerticalAlignment = VerticalAlignment.Center;
-                upText.IsHitTestVisible = false;
-                up.Child = upText;
-
-                up.MouseEnter += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_UpHover; };
-                up.MouseLeave += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_UpNormal; };
-                up.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs ev)
+                up.SetBounds(nameRight - BTN_SZ, btnY, BTN_SZ, BTN_SZ);
+                up.MouseEnter += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_UpHover; };
+                up.MouseLeave += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_UpNormal; };
+                up.Click += delegate(object s, EventArgs ev)
                 {
-                    string target = (string)((Border)s).Tag;
+                    string target = (string)((Label)s).Tag;
                     for (int i = 1; i < paths.Count; i++)
                     {
                         if (paths[i].ItemPath == target)
@@ -927,31 +977,28 @@ class QuickPaths
                     SavePaths();
                     RebuildList();
                 };
-                row.Children.Add(up);
+                expandedPanel.Controls.Add(up);
+                nameRight -= BTN_SZ + BTN_GAP;
             }
 
-            // Name button (fills remaining space)
-            var nameBtn = new Border();
-            nameBtn.Padding = new Thickness(10, 7, 10, 7);
-            nameBtn.CornerRadius = new CornerRadius(7);
-            nameBtn.Background = C_ItemNormal;
+            // Name button
+            var nameBtn = new Label();
+            nameBtn.Text = item.Name;
+            nameBtn.Font = fItem;
+            nameBtn.ForeColor = Color.White;
+            nameBtn.BackColor = C_ItemNormal;
+            nameBtn.TextAlign = ContentAlignment.MiddleLeft;
             nameBtn.Cursor = Cursors.Hand;
             nameBtn.Tag = item.ItemPath;
-            nameBtn.ToolTip = item.ItemPath;
-
-            var nameText = new TextBlock();
-            nameText.Text = item.Name;
-            nameText.Foreground = Brushes.White;
-            nameText.FontSize = 13;
-            nameText.TextTrimming = TextTrimming.CharacterEllipsis;
-            nameText.IsHitTestVisible = false;
-            nameBtn.Child = nameText;
-
-            nameBtn.MouseEnter += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_ItemHover; };
-            nameBtn.MouseLeave += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_ItemNormal; };
-            nameBtn.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs ev)
+            nameBtn.AutoEllipsis = true;
+            nameBtn.Padding = new Padding(10, 0, 10, 0);
+            nameBtn.SetBounds(P_PAD, y, nameRight - P_PAD, ITEM_H);
+            toolTip.SetToolTip(nameBtn, item.ItemPath);
+            nameBtn.MouseEnter += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_ItemHover; };
+            nameBtn.MouseLeave += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_ItemNormal; };
+            nameBtn.Click += delegate(object s, EventArgs ev)
             {
-                string p = (string)((Border)s).Tag;
+                string p = (string)((Label)s).Tag;
                 if (claudeMode)
                 {
                     try
@@ -972,44 +1019,38 @@ class QuickPaths
                 Collapse();
                 FlashDot();
             };
-            row.Children.Add(nameBtn);
-            listPanel.Children.Add(row);
+            expandedPanel.Controls.Add(nameBtn);
+            y += ITEM_H + ITEM_GAP;
         }
 
         // --- Separator ---
         if (paths.Count > 0)
         {
-            var sep = new Border();
-            sep.Height = 1;
-            sep.Background = C_Sep;
-            sep.Margin = new Thickness(4, 6, 4, 4);
-            listPanel.Children.Add(sep);
+            y += SEP_MT - ITEM_GAP;
+            var sep = new Label();
+            sep.BackColor = C_Sep;
+            sep.SetBounds(P_PAD + 4, y, contentW - 8, 1);
+            expandedPanel.Controls.Add(sep);
+            y += 1 + SEP_MB;
         }
 
         // --- Add button ---
-        var addBtn = new Border();
-        addBtn.Padding = new Thickness(10, 5, 10, 5);
-        addBtn.CornerRadius = new CornerRadius(7);
-        addBtn.Background = C_AddBg;
+        var addBtn = new Label();
+        addBtn.Text = "+";
+        addBtn.Font = fAdd;
+        addBtn.ForeColor = C_AddText;
+        addBtn.BackColor = C_AddBg;
+        addBtn.TextAlign = ContentAlignment.MiddleCenter;
         addBtn.Cursor = Cursors.Hand;
-
-        var addText = new TextBlock();
-        addText.Text = "+";
-        addText.Foreground = C_AddText;
-        addText.FontSize = 16;
-        addText.HorizontalAlignment = HorizontalAlignment.Center;
-        addText.IsHitTestVisible = false;
-        addBtn.Child = addText;
-
-        addBtn.MouseEnter += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_AddHover; };
-        addBtn.MouseLeave += delegate(object s, MouseEventArgs ev) { ((Border)s).Background = C_AddBg; };
-        addBtn.MouseLeftButtonDown += delegate
+        addBtn.SetBounds(P_PAD, y, contentW, ADD_H);
+        addBtn.MouseEnter += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_AddHover; };
+        addBtn.MouseLeave += delegate(object s, EventArgs ev) { ((Label)s).BackColor = C_AddBg; };
+        addBtn.Click += delegate
         {
             dialogOpen = true;
             try
             {
-                win.Topmost = false;
-                // "选择文件夹  (Ctrl+点击多选)"
+                form.TopMost = false;
                 string dlgTitle = "\u9009\u62E9\u6587\u4EF6\u5939  (Ctrl+\u70B9\u51FB\u591A\u9009)";
                 string[] selected = FolderMultiPicker.ShowDialog(dlgTitle);
                 int added = 0;
@@ -1033,12 +1074,32 @@ class QuickPaths
             finally
             {
                 dialogOpen = false;
-                win.Topmost = true;
-                win.Activate();
+                form.TopMost = true;
+                form.Activate();
                 if (expanded) RebuildList();
             }
         };
-        listPanel.Children.Add(addBtn);
+        expandedPanel.Controls.Add(addBtn);
+        y += ADD_H + P_PAD_V;
+
+        // --- Set form size ---
+        form.ClientSize = new Size(panelW, y);
+        form.Region = MakeRoundedRegion(panelW, y, 12);
+        form.BackColor = C_PanelBg;
+
+        // Keep panel on screen
+        Screen scr = Screen.FromPoint(form.Location);
+        Rectangle wa = scr.WorkingArea;
+        if (form.Right > wa.Right)
+            form.Left = wa.Right - panelW;
+        if (form.Bottom > wa.Bottom)
+            form.Top = wa.Bottom - y;
+        if (form.Left < wa.Left)
+            form.Left = wa.Left;
+        if (form.Top < wa.Top)
+            form.Top = wa.Top;
+
+        form.Controls.Add(expandedPanel);
     }
 
     // =====================================================================
@@ -1090,7 +1151,6 @@ class QuickPaths
                     json = Encoding.UTF8.GetString(ms.ToArray());
                 }
             }
-            // Safe write: tmp -> delete original -> rename
             string tmp = dataFile + ".tmp";
             File.WriteAllText(tmp, json, noBom);
             if (File.Exists(dataFile)) File.Delete(dataFile);
@@ -1101,7 +1161,6 @@ class QuickPaths
             Log("SavePaths error: " + ex.Message);
             try
             {
-                // Fallback: direct write
                 var noBom = new UTF8Encoding(false);
                 var ser = new DataContractJsonSerializer(typeof(List<PathItem>));
                 using (var ms = new MemoryStream())
@@ -1134,22 +1193,19 @@ class QuickPaths
 
         if (cfg != null) claudeMode = cfg.ClaudeMode;
 
-        double vl = SystemParameters.VirtualScreenLeft;
-        double vt = SystemParameters.VirtualScreenTop;
-        double vw = SystemParameters.VirtualScreenWidth;
-        double vh = SystemParameters.VirtualScreenHeight;
+        Rectangle vs = SystemInformation.VirtualScreen;
         Log("LoadConfig: saved=(" + (cfg != null ? cfg.Left.ToString() : "null") + ","
             + (cfg != null ? cfg.Top.ToString() : "null") + ") VirtualScreen=("
-            + (int)vl + "," + (int)vt + "," + (int)vw + "," + (int)vh + ")");
+            + vs.X + "," + vs.Y + "," + vs.Width + "," + vs.Height + ")");
 
-        if (cfg == null || cfg.Left < vl || cfg.Left > vl + vw - 30
-                        || cfg.Top < vt || cfg.Top > vt + vh - 30)
+        if (cfg == null || cfg.Left < vs.Left || cfg.Left > vs.Right - 30
+                        || cfg.Top < vs.Top || cfg.Top > vs.Bottom - 30)
         {
-            Rect wa = SystemParameters.WorkArea;
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
             cfg = new AppConfig
             {
-                Left = (int)(wa.Width - 60),
-                Top = (int)(wa.Height * 0.4),
+                Left = wa.Right - 60,
+                Top = wa.Top + (int)(wa.Height * 0.4),
                 ClaudeMode = claudeMode,
                 Scale = 1.0
             };
@@ -1163,13 +1219,13 @@ class QuickPaths
     {
         try
         {
-            int l = (int)win.Left, t = (int)win.Top;
+            int l = form.Left, t = form.Top;
             Log("SaveConfig: (" + l + "," + t + ")");
             var cfg = new AppConfig
             {
                 Left = l, Top = t,
                 ClaudeMode = claudeMode,
-                Scale = dotScale.ScaleX
+                Scale = scale
             };
             var ser = new DataContractJsonSerializer(typeof(AppConfig));
             var noBom = new UTF8Encoding(false);
@@ -1225,13 +1281,10 @@ class QuickPaths
                 ? (DateTime.Now - startTime).ToString(@"hh\:mm\:ss\.fff") : "N/A";
             Log("  CrashContext: PID=" + Process.GetCurrentProcess().Id
                 + " Uptime=" + uptime + " Expanded=" + expanded + " DialogOpen=" + dialogOpen);
-            double vl = SystemParameters.VirtualScreenLeft;
-            double vt = SystemParameters.VirtualScreenTop;
-            double vw = SystemParameters.VirtualScreenWidth;
-            double vh = SystemParameters.VirtualScreenHeight;
-            Log("  CrashContext: VirtualScreen=(" + (int)vl + "," + (int)vt + "," + (int)vw + "," + (int)vh + ")");
-            if (win != null)
-                Log("  CrashContext: WindowPos=(" + (int)win.Left + "," + (int)win.Top + ") Topmost=" + win.Topmost);
+            Rectangle vs = SystemInformation.VirtualScreen;
+            Log("  CrashContext: VirtualScreen=(" + vs.X + "," + vs.Y + "," + vs.Width + "," + vs.Height + ")");
+            if (form != null)
+                Log("  CrashContext: WindowPos=(" + form.Left + "," + form.Top + ") Topmost=" + form.TopMost);
             double mem = Math.Round(GC.GetTotalMemory(false) / 1048576.0, 1);
             Log("  CrashContext: ManagedMemory=" + mem + "MB");
         }
@@ -1239,52 +1292,71 @@ class QuickPaths
     }
 
     // =====================================================================
-    //  Brush helpers
+    //  Color & Font initialization
     // =====================================================================
 
-    static SolidColorBrush Br(byte a, byte r, byte g, byte b)
+    static Color Blend(Color bg, int a, int r, int g, int b)
     {
-        var brush = new SolidColorBrush(Color.FromArgb(a, r, g, b));
-        brush.Freeze();
-        return brush;
+        float alpha = a / 255f;
+        return Color.FromArgb(255,
+            (int)(r * alpha + bg.R * (1 - alpha)),
+            (int)(g * alpha + bg.G * (1 - alpha)),
+            (int)(b * alpha + bg.B * (1 - alpha)));
     }
 
-    void InitBrushes()
+    void InitColors()
     {
-        // ECG monitor — Anthropic brand palette
-        C_MonBg        = Br(240, 18, 20, 26);
-        C_MonHover     = Br(250, 28, 30, 38);
-        C_MonBdrBlue   = Br(55, 106, 155, 204);
-        C_MonBdrOrange = Br(55, 217, 119, 87);
-        C_WaveBlue     = Br(190, 106, 155, 204);
-        C_WaveOrange   = Br(190, 217, 119, 87);
-        C_WaveGreen    = Br(210, 120, 140, 93);
-        C_PenBlue      = Br(255, 155, 200, 240);
-        C_PenOrange    = Br(255, 245, 160, 125);
-        C_PenGreen     = Br(255, 165, 190, 140);
-        // Panel
-        C_PanelBg    = Br(245, 32, 34, 38);
-        C_ItemNormal = Br(22, 255, 255, 255);
-        C_ItemHover  = Br(50, 255, 255, 255);
-        C_UpNormal   = Brushes.Transparent;
-        C_UpHover    = Br(35, 255, 255, 255);
-        C_UpText     = Br(100, 180, 180, 180);
-        C_DelNormal  = Brushes.Transparent;
-        C_DelHover   = Br(40, 255, 80, 80);
-        C_DelText    = Br(120, 255, 100, 100);
-        C_AddBg      = Brushes.Transparent;
-        C_AddHover   = Br(22, 255, 255, 255);
-        C_AddText    = Br(110, 180, 180, 180);
-        C_Sep        = Br(18, 255, 255, 255);
-        // Claude toggle — Anthropic brand orange #d97757
-        C_ClaudeOff      = Br(15, 250, 249, 245);
-        C_ClaudeOn       = Br(130, 217, 119, 87);
-        C_ClaudeHoverOff = Br(28, 250, 249, 245);
-        C_ClaudeHoverOn  = Br(150, 217, 119, 87);
-        C_ClaudeTextOff  = Br(75, 176, 174, 165);
-        C_ClaudeTextOn   = Br(255, 250, 249, 245);
-        C_ClaudeBdrOff   = Br(22, 176, 174, 165);
-        C_ClaudeBdrOn    = Br(180, 217, 119, 87);
+        // ECG monitor (used in GDI+ painting with alpha support)
+        C_MonBg        = Color.FromArgb(18, 20, 26);
+        C_MonHover     = Color.FromArgb(28, 30, 38);
+        C_MonBdrBlue   = Color.FromArgb(55, 106, 155, 204);
+        C_MonBdrOrange = Color.FromArgb(55, 217, 119, 87);
+        C_WaveBlue     = Color.FromArgb(190, 106, 155, 204);
+        C_WaveOrange   = Color.FromArgb(190, 217, 119, 87);
+        C_WaveGreen    = Color.FromArgb(210, 120, 140, 93);
+        C_PenBlue      = Color.FromArgb(155, 200, 240);
+        C_PenOrange    = Color.FromArgb(245, 160, 125);
+        C_PenGreen     = Color.FromArgb(165, 190, 140);
+
+        // Panel (pre-blended against panel bg for WinForms controls)
+        Color bg = Color.FromArgb(32, 34, 38);
+        C_PanelBg    = bg;
+        C_ItemNormal = Blend(bg, 22, 255, 255, 255);
+        C_ItemHover  = Blend(bg, 50, 255, 255, 255);
+        C_UpNormal   = bg;
+        C_UpHover    = Blend(bg, 35, 255, 255, 255);
+        C_UpText     = Blend(bg, 100, 180, 180, 180);
+        C_DelNormal  = bg;
+        C_DelHover   = Blend(bg, 40, 255, 80, 80);
+        C_DelText    = Blend(bg, 120, 255, 100, 100);
+        C_AddBg      = bg;
+        C_AddHover   = Blend(bg, 22, 255, 255, 255);
+        C_AddText    = Blend(bg, 110, 180, 180, 180);
+        C_Sep        = Blend(bg, 18, 255, 255, 255);
+
+        // Claude toggle
+        C_ClaudeOff      = Blend(bg, 15, 250, 249, 245);
+        C_ClaudeOn       = Blend(bg, 130, 217, 119, 87);
+        C_ClaudeHoverOff = Blend(bg, 28, 250, 249, 245);
+        C_ClaudeHoverOn  = Blend(bg, 150, 217, 119, 87);
+        C_ClaudeTextOff  = Blend(bg, 75, 176, 174, 165);
+        C_ClaudeTextOn   = Color.FromArgb(250, 249, 245);
+    }
+
+    void InitFonts()
+    {
+        fItem   = new Font("Segoe UI", 10f);
+        fAdd    = new Font("Segoe UI", 12f);
+        fClaude = new Font("Segoe UI", 10f);
+        fHint   = new Font("Segoe UI", 9f);
+    }
+
+    void DisposeFonts()
+    {
+        if (fItem != null) fItem.Dispose();
+        if (fAdd != null) fAdd.Dispose();
+        if (fClaude != null) fClaude.Dispose();
+        if (fHint != null) fHint.Dispose();
     }
 
     // =====================================================================
@@ -1296,22 +1368,16 @@ class QuickPaths
         string exePath = Assembly.GetExecutingAssembly().Location;
         string exeDir = Path.GetDirectoryName(exePath);
 
-        // 1. Kill old instances
         KillOldInstances();
-
-        // 2. Clean up old Task Scheduler watchdog
         RunHidden("schtasks", "/Delete /TN QuickPaths_Watchdog /F");
 
-        // 3. Clean up old watchdog files
         TryDelete(Path.Combine(exeDir, "watchdog.ps1"));
         TryDelete(Path.Combine(exeDir, "watchdog.vbs"));
         TryDelete(Path.Combine(exeDir, "wrapper.lock"));
 
-        // 4. Remove old Startup VBS
         string startupDir = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
         TryDelete(Path.Combine(startupDir, "QuickPaths.vbs"));
 
-        // 5. Register auto-start via Registry
         try
         {
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REG_RUN, true))
@@ -1322,10 +1388,8 @@ class QuickPaths
         }
         catch { }
 
-        // 6. Register keepalive scheduled task (every 5 minutes, singleton mutex prevents duplicates)
         RunHidden("schtasks", "/Create /TN \"QuickPaths_KeepAlive\" /SC MINUTE /MO 5 /TR \"\\\"" + exePath + "\\\"\" /F");
 
-        // 7. Launch QuickPaths (normal mode)
         try
         {
             Process.Start(new ProcessStartInfo
@@ -1336,13 +1400,12 @@ class QuickPaths
         }
         catch { }
 
-        // 8. Success message
         MessageBox.Show(
             "QuickPaths installed successfully!\n\n"
             + "  Auto-start: Enabled (registry + keepalive task)\n"
             + "  Location: " + exeDir + "\n\n"
             + "The floating dot should appear on your desktop.",
-            "QuickPaths Install", MessageBoxButton.OK, MessageBoxImage.Information);
+            "QuickPaths Install", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     static void DoUninstall()
@@ -1350,10 +1413,8 @@ class QuickPaths
         string exePath = Assembly.GetExecutingAssembly().Location;
         string exeDir = Path.GetDirectoryName(exePath);
 
-        // 1. Kill running instances
         KillOldInstances();
 
-        // 2. Remove auto-start registry key
         try
         {
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REG_RUN, true))
@@ -1363,51 +1424,44 @@ class QuickPaths
         }
         catch { }
 
-        // 3. Remove old Startup VBS (backward compat)
         string startupDir = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
         TryDelete(Path.Combine(startupDir, "QuickPaths.vbs"));
 
-        // 4. Remove scheduled tasks (keepalive + old watchdog)
         RunHidden("schtasks", "/Delete /TN \"QuickPaths_KeepAlive\" /F");
         RunHidden("schtasks", "/Delete /TN QuickPaths_Watchdog /F");
 
-        // 5. Clean up old files
         TryDelete(Path.Combine(exeDir, "watchdog.ps1"));
         TryDelete(Path.Combine(exeDir, "watchdog.vbs"));
         TryDelete(Path.Combine(exeDir, "wrapper.lock"));
 
-        // 6. Ask about user data
         var r = MessageBox.Show(
             "Delete user data (saved paths and window position)?\n\n"
             + "  paths.json - your saved path list\n"
             + "  config.json - window position\n\n"
             + "Click Yes to delete, No to keep.",
-            "QuickPaths Uninstall", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            "QuickPaths Uninstall", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
 
-        if (r == MessageBoxResult.Yes)
+        if (r == DialogResult.Yes)
         {
             TryDelete(Path.Combine(exeDir, "paths.json"));
             TryDelete(Path.Combine(exeDir, "config.json"));
         }
 
-        // 7. Done
         MessageBox.Show(
             "QuickPaths uninstalled.\n\n"
             + "  Auto-start: Removed\n"
             + "  Program files: Kept (delete manually if desired)",
-            "QuickPaths Uninstall", MessageBoxButton.OK, MessageBoxImage.Information);
+            "QuickPaths Uninstall", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     static void KillOldInstances()
     {
         int myPid = Process.GetCurrentProcess().Id;
-        // Kill QuickPaths.exe processes (except self)
         foreach (var p in Process.GetProcessesByName("QuickPaths"))
         {
             if (p.Id != myPid)
                 try { p.Kill(); } catch { }
         }
-        // Kill old VBS wrapper and PS-based instances
         try { RunHidden("wmic", "process where \"name='wscript.exe' and commandline like '%QuickPaths%'\" call terminate"); } catch { }
         try { RunHidden("wmic", "process where \"name='powershell.exe' and commandline like '%QuickPaths.ps1%'\" call terminate"); } catch { }
         Thread.Sleep(500);

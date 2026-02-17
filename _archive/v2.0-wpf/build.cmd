@@ -10,10 +10,13 @@ if not exist "%CSC%" (
 
 echo Building QuickPaths.exe ...
 "%CSC%" /nologo /target:winexe /out:QuickPaths.exe ^
+    /lib:"%FW%\WPF" ^
+    /r:PresentationFramework.dll ^
+    /r:PresentationCore.dll ^
+    /r:WindowsBase.dll ^
+    /r:System.Xaml.dll ^
     /r:System.dll ^
     /r:System.Core.dll ^
-    /r:System.Drawing.dll ^
-    /r:System.Windows.Forms.dll ^
     /r:System.Runtime.Serialization.dll ^
     QuickPaths.cs
 
