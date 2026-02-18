@@ -290,6 +290,7 @@ class QuickPaths
         form.StartPosition = FormStartPosition.Manual;
         form.Location = new Point(cfg.Left, cfg.Top);
         form.BackColor = C_MonBg;
+        form.TransparencyKey = Color.FromArgb(1, 0, 1);
         toolTip = new ToolTip();
 
         // --- Dot panel ---
@@ -505,8 +506,8 @@ class QuickPaths
         int w = (int)(DOT_W * scale);
         int h = (int)(DOT_H * scale);
         form.ClientSize = new Size(w, h);
-        form.Region = MakeRoundedRegion(w, h, (int)(6 * scale));
-        form.BackColor = C_MonBg;
+        form.Region = null;
+        form.BackColor = form.TransparencyKey;
     }
 
     static Region MakeRoundedRegion(int w, int h, int r)
@@ -532,6 +533,7 @@ class QuickPaths
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(form.TransparencyKey);
             float s = (float)scale;
             int w = dotPanel.Width;
             int h = dotPanel.Height;
@@ -1310,8 +1312,8 @@ class QuickPaths
         // ECG monitor (used in GDI+ painting with alpha support)
         C_MonBg        = Color.FromArgb(18, 20, 26);
         C_MonHover     = Color.FromArgb(28, 30, 38);
-        C_MonBdrBlue   = Color.FromArgb(55, 106, 155, 204);
-        C_MonBdrOrange = Color.FromArgb(55, 217, 119, 87);
+        C_MonBdrBlue   = Color.FromArgb(80, 106, 155, 204);
+        C_MonBdrOrange = Color.FromArgb(80, 217, 119, 87);
         C_WaveBlue     = Color.FromArgb(190, 106, 155, 204);
         C_WaveOrange   = Color.FromArgb(190, 217, 119, 87);
         C_WaveGreen    = Color.FromArgb(210, 120, 140, 93);

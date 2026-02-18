@@ -61,7 +61,7 @@ QuickPaths.exe --uninstall  → 停止 + 反注册 + 清理 + 询问删数据 + 
 6. **删文件≠删引用**：废弃外部资源时必须同步清理所有引用方（计划任务、注册表、Startup 快捷方式等）
 7. **csc.exe 版本仅支持 C# 5**：不能用 `$""` 字符串插值、`?.` 空条件运算符、`=>` 表达式体成员
 8. **WinForms 控件不支持半透明 BackColor**：需预混合 alpha 颜色到面板背景色上（`Blend()` 函数）
-9. **Region 裁剪无抗锯齿**：圆角边缘会有锯齿，这是 WinForms 固有限制，可接受
+9. **Region 裁剪无抗锯齿**：dot 模式已改用 `TransparencyKey` + GDI+ AntiAlias 解决；展开面板仍用 Region（有子控件，可接受）
 10. **GDI+ PathGradientBrush 退化路径**：极小半径时可能抛异常，需 try-catch 保护
 11. **SetUnhandledExceptionMode 时序**：必须在创建任何 Form 之前调用，否则抛 InvalidOperationException 且无法捕获（因为异常处理器尚未注册）
 
