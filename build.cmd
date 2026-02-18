@@ -10,6 +10,7 @@ if not exist "%CSC%" (
 
 echo Building QuickPaths.exe ...
 "%CSC%" /nologo /target:winexe /out:QuickPaths.exe ^
+    /win32manifest:app.manifest ^
     /r:System.dll ^
     /r:System.Core.dll ^
     /r:System.Drawing.dll ^

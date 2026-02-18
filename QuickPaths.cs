@@ -283,6 +283,7 @@ class QuickPaths
 
         // --- Form ---
         form = new Form();
+        form.AutoScaleMode = AutoScaleMode.Dpi;
         form.FormBorderStyle = FormBorderStyle.None;
         form.TopMost = true;
         form.ShowInTaskbar = false;

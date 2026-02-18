@@ -13,6 +13,7 @@
 |------|------|
 | `QuickPaths.cs` | 主程序源码（WinForms + GDI+ 自绘 + 全部逻辑 + install/uninstall） |
 | `build.cmd` | csc.exe 编译脚本 |
+| `app.manifest` | DPI 感知清单（Per-Monitor V2 回退链），嵌入 exe |
 | `QuickPaths.exe` | 编译产物（不入库，build.cmd 生成或从 Releases 下载） |
 | `setup.ps1` | 在线安装脚本（`irm \| iex` 一行命令安装） |
 | `setup.cs` | exe 安装器 C# 源码 |
