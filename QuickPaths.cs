@@ -838,6 +838,44 @@ class QuickPaths
     //  Rebuild path list panel
     // =====================================================================
 
+    void PromoteRecentItem(string clickedPath)
+    {
+        string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        if (string.Equals(clickedPath, desktopPath, StringComparison.OrdinalIgnoreCase)) return;
+
+        int ci = -1;
+        for (int i = 0; i < paths.Count; i++)
+            if (paths[i].ItemPath == clickedPath) { ci = i; break; }
+        if (ci < 0) return;
+
+        bool desktopAtZero = paths.Count > 0 &&
+            string.Equals(paths[0].ItemPath, desktopPath, StringComparison.OrdinalIgnoreCase);
+        int insertAt = desktopAtZero ? 1 : 0;
+        if (ci == insertAt) return;
+
+        var item = paths[ci];
+        paths.RemoveAt(ci);
+        if (insertAt > paths.Count) insertAt = paths.Count;
+        paths.Insert(insertAt, item);
+        SavePaths();
+    }
+
+    bool EnsureDesktopFirst()
+    {
+        string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        for (int i = 1; i < paths.Count; i++)
+        {
+            if (string.Equals(paths[i].ItemPath, desktopPath, StringComparison.OrdinalIgnoreCase))
+            {
+                var desktop = paths[i];
+                paths.RemoveAt(i);
+                paths.Insert(0, desktop);
+                return true;
+            }
+        }
+        return false;
+    }
+
     void RebuildList()
     {
         // Prune invalid paths
@@ -852,6 +890,7 @@ class QuickPaths
             }
         }
         if (removed > 0) SavePaths();
+        if (EnsureDesktopFirst()) SavePaths();
 
         // Remove old panel
         if (expandedPanel != null)
@@ -1019,6 +1058,7 @@ class QuickPaths
                     try { Clipboard.SetText(p); }
                     catch (Exception ex) { Log("Clipboard error: " + ex.Message); return; }
                 }
+                PromoteRecentItem(p);
                 Collapse();
                 FlashDot();
             };
