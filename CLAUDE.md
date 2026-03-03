@@ -69,7 +69,7 @@ QuickPaths.exe --uninstall  → 停止 + 反注册 + 清理 + 询问删数据 + 
 
 | slug | 标题 | 状态 |
 |------|------|------|
-| `quickpaths-claude-launcher` | 【Claude Code】我给 Claude Code 做了个桌面启动器 | 草稿 |
+| `quickpaths-claude-launcher` | 【Claude Code】我给 Claude Code 做了个桌面启动器 | 已发布 |
 
 大改后须同步更新文章内容（`csdn-auto-publisher/articles/quickpaths-claude-launcher/content.md`）。
 
