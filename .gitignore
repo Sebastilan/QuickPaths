@@ -19,3 +19,6 @@ wrapper.lock
 QuickPaths.exe
 QuickPathsSetup.exe
 *.pdb
+memory/
+preload/
+_archive/
